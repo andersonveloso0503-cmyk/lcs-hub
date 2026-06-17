@@ -85,7 +85,13 @@ export default function CRM() {
         />
       )}
 
-      {!loading && tab === "inbox" && <Inbox contacts={contacts} />}
+      {!loading && tab === "inbox" && (
+        <Inbox
+          contacts={contacts}
+          onCreateContact={addContact}
+          onUpdateContactStatus={handleStatusChange}
+        />
+      )}
 
       {!loading && tab === "followup" && (
         <FollowUpPanel

@@ -303,7 +303,7 @@ code {
 /* ── KANBAN ── */
 .kanban-board {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -745,6 +745,9 @@ code {
 }
 
 /* responsive */
+@media (max-width: 1100px) {
+  .kanban-board { grid-template-columns: repeat(3, 1fr); }
+}
 @media (max-width: 900px) {
   .kanban-board { grid-template-columns: 1fr 1fr; }
   .inbox-layout { grid-template-columns: 1fr; height: auto; }
@@ -1015,3 +1018,126 @@ input[type="range"] { padding: 0; background: none; }
 .tab:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .followup-card { border-left: 3px solid #D97706; }
+
+/* ══════════════ ÁUDIO NO WHATSAPP ══════════════ */
+
+.mic-btn {
+  background: var(--gray-light);
+  color: var(--navy);
+}
+.mic-btn.active {
+  background: #DC2626;
+  color: white;
+  animation: pulse-rec 1.4s ease-in-out infinite;
+}
+@keyframes pulse-rec {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(220,38,38,0.15); }
+}
+
+.recording-bar {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border: 1.5px solid #FECACA;
+  background: #FEF2F2;
+  border-radius: 10px;
+  font-size: 13.5px;
+  color: #B91C1C;
+  font-weight: 500;
+}
+.recording-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #DC2626;
+  animation: pulse-rec 1.2s ease-in-out infinite;
+}
+.recording-cancel {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #B91C1C;
+  cursor: pointer;
+  display: flex;
+  padding: 2px;
+}
+
+.audio-bubble {
+  min-width: 220px;
+}
+.audio-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 200px;
+}
+.audio-play-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--blue);
+  color: white;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.chat-bubble.from-me .audio-play-btn {
+  background: white;
+  color: var(--blue);
+}
+.audio-progress {
+  flex: 1;
+  height: 4px;
+  background: rgba(13,27,42,0.12);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.chat-bubble.from-me .audio-progress { background: rgba(255,255,255,0.3); }
+.audio-progress-fill {
+  height: 100%;
+  background: var(--blue);
+  border-radius: 4px;
+}
+.chat-bubble.from-me .audio-progress-fill { background: white; }
+.audio-duration {
+  font-size: 11px;
+  opacity: 0.75;
+  flex-shrink: 0;
+  min-width: 32px;
+}
+
+/* ══════════════ INBOX - SELETOR DE STATUS POR CONVERSA ══════════════ */
+
+.inbox-item-wrapper {
+  border-bottom: 1px solid #F1F5F9;
+  position: relative;
+}
+.inbox-item-wrapper.active { background: var(--light); }
+.inbox-item-wrapper .inbox-item {
+  border-bottom: none;
+  padding-bottom: 6px;
+}
+
+.inbox-status-select {
+  margin: 0 16px 10px 58px;
+  width: calc(100% - 74px);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 20px;
+  border: 1.5px solid var(--gray-light);
+  background: white;
+  color: var(--gray);
+  cursor: pointer;
+}
+.inbox-status-select.status-lead { border-color: #93B4F8; background: #EFF6FF; color: var(--blue); }
+.inbox-status-select.status-proposta { border-color: #F3CC8C; background: #FFFBEB; color: #B45309; }
+.inbox-status-select.status-contrato { border-color: #8FE0DC; background: #ECFEFF; color: #0B8A86; }
+.inbox-status-select.status-funcionario { border-color: #C4B5FD; background: #F5F3FF; color: #6D28D9; }
+.inbox-status-select.status-inativo { border-color: var(--gray-light); background: #F8FAFC; color: var(--gray); }

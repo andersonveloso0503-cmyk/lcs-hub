@@ -1,7 +1,17 @@
 import { useState, useMemo } from "react";
 import { Search } from "lucide-react";
 import { useWhatsAppMessages } from "./useWhatsAppMessages";
+import { normalizePhone } from "../services/evolutionApi";
 import WhatsAppChat from "./WhatsAppChat";
+
+const STATUS_OPTIONS = [
+  { value: "", label: "Sem classificar" },
+  { value: "lead", label: "Lead" },
+  { value: "proposta", label: "Proposta" },
+  { value: "contrato", label: "Contrato" },
+  { value: "funcionario", label: "Funcionário" },
+  { value: "inativo", label: "Inativo" },
+];
 
 function formatRelativeTime(ts) {
   if (!ts) return "";
@@ -14,19 +24,19 @@ function formatRelativeTime(ts) {
   return `${diffD}d`;
 }
 
-export default function Inbox({ contacts }) {
-  const { conversations, loading, getMessagesForPhone, logOutgoingMessage } =
+export default function Inbox({ contacts, onCreateContact, onUpdateContactStatus }) {
+  const { conversations, loading, getMessagesForPhone, logOutgoingMessage, logOutgoingAudio } =
     useWhatsAppMessages();
   const [selectedPhone, setSelectedPhone] = useState(null);
   const [search, setSearch] = useState("");
+  const [savingPhone, setSavingPhone] = useState(null);
 
-  // Cruza telefone com nome do contato no CRM, se existir
+  // Cruza telefone com o contato completo do CRM, se existir
   const contactByPhone = useMemo(() => {
     const map = new Map();
     for (const c of contacts) {
       if (c.whatsapp) {
-        const digits = c.whatsapp.replace(/\D/g, "");
-        map.set(digits.startsWith("55") ? digits : "55" + digits, c.name);
+        map.set(normalizePhone(c.whatsapp), c);
       }
     }
     return map;
@@ -34,7 +44,8 @@ export default function Inbox({ contacts }) {
 
   const filtered = conversations.filter((conv) => {
     if (!search) return true;
-    const name = contactByPhone.get(conv.phone) || "";
+    const contact = contactByPhone.get(conv.phone);
+    const name = contact?.name || "";
     return (
       conv.phone.includes(search) ||
       name.toLowerCase().includes(search.toLowerCase())
@@ -42,6 +53,33 @@ export default function Inbox({ contacts }) {
   });
 
   const selectedMessages = selectedPhone ? getMessagesForPhone(selectedPhone) : [];
+  const selectedContact = selectedPhone ? contactByPhone.get(selectedPhone) : null;
+
+  async function handleStatusChange(conv, newStatus) {
+    setSavingPhone(conv.phone);
+    const existing = contactByPhone.get(conv.phone);
+
+    if (!newStatus) {
+      // "Sem classificar" só se aplica se ainda não existir contato
+      setSavingPhone(null);
+      return;
+    }
+
+    if (existing) {
+      await onUpdateContactStatus(existing.id, newStatus);
+    } else {
+      // Cria contato automaticamente a partir da conversa
+      const guessedName = conv.messages.find((m) => m.pushName)?.pushName || "";
+      await onCreateContact({
+        name: guessedName,
+        whatsapp: conv.phone,
+        status: newStatus,
+        service: "Limpeza",
+        type: "Empresa",
+      });
+    }
+    setSavingPhone(null);
+  }
 
   return (
     <div className="inbox-layout">
@@ -63,29 +101,48 @@ export default function Inbox({ contacts }) {
         )}
 
         {filtered.map((conv) => {
-          const name = contactByPhone.get(conv.phone);
+          const contact = contactByPhone.get(conv.phone);
+          const name = contact?.name;
+          const currentStatus = contact?.status || "";
           return (
-            <button
+            <div
               key={conv.phone}
-              className={"inbox-item" + (selectedPhone === conv.phone ? " active" : "")}
-              onClick={() => setSelectedPhone(conv.phone)}
+              className={"inbox-item-wrapper" + (selectedPhone === conv.phone ? " active" : "")}
             >
-              <div className="inbox-avatar">
-                {(name || conv.phone).charAt(0).toUpperCase()}
-              </div>
-              <div className="inbox-item-body">
-                <div className="inbox-item-top">
-                  <span className="inbox-item-name">{name || `+${conv.phone}`}</span>
-                  <span className="inbox-item-time">
-                    {formatRelativeTime(conv.lastMessage?.messageTimestamp)}
-                  </span>
+              <button
+                className="inbox-item"
+                onClick={() => setSelectedPhone(conv.phone)}
+              >
+                <div className="inbox-avatar">
+                  {(name || conv.phone).charAt(0).toUpperCase()}
                 </div>
-                <div className="inbox-item-preview">
-                  {conv.lastMessage?.fromMe && <span className="preview-you">Você: </span>}
-                  {conv.lastMessage?.text}
+                <div className="inbox-item-body">
+                  <div className="inbox-item-top">
+                    <span className="inbox-item-name">{name || `+${conv.phone}`}</span>
+                    <span className="inbox-item-time">
+                      {formatRelativeTime(conv.lastMessage?.messageTimestamp)}
+                    </span>
+                  </div>
+                  <div className="inbox-item-preview">
+                    {conv.lastMessage?.fromMe && <span className="preview-you">Você: </span>}
+                    {conv.lastMessage?.text}
+                  </div>
                 </div>
-              </div>
-            </button>
+              </button>
+              <select
+                className={"inbox-status-select" + (currentStatus ? " status-" + currentStatus : "")}
+                value={currentStatus}
+                disabled={savingPhone === conv.phone}
+                onChange={(e) => handleStatusChange(conv, e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {STATUS_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           );
         })}
       </div>
@@ -94,8 +151,9 @@ export default function Inbox({ contacts }) {
         <WhatsAppChat
           phone={selectedPhone}
           messages={selectedMessages}
-          contactName={selectedPhone ? contactByPhone.get(selectedPhone) : ""}
+          contactName={selectedContact?.name}
           onSent={(text) => logOutgoingMessage(selectedPhone, text)}
+          onSentAudio={(audioUrl, duration) => logOutgoingAudio(selectedPhone, audioUrl, duration)}
         />
       </div>
     </div>

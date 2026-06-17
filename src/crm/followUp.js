@@ -4,6 +4,7 @@ export const FOLLOWUP_RULES = {
   lead: 2,
   proposta: 3,
   contrato: 7,
+  funcionario: null, // funcionários não entram no fluxo de follow-up de vendas
   inativo: null, // nunca alerta
 };
 

@@ -73,6 +73,7 @@ export function useWhatsAppMessages() {
       phone,
       fromMe: true,
       text,
+      type: "text",
       pushName: "",
       messageTimestamp: Date.now(),
       createdAt: serverTimestamp(),
@@ -80,5 +81,33 @@ export function useWhatsAppMessages() {
     });
   }
 
-  return { messages, conversations, loading, error, getMessagesForPhone, logOutgoingMessage };
+  /**
+   * Registra localmente um áudio enviado, salvando o data URL para reprodução
+   * imediata (sem esperar o webhook).
+   */
+  async function logOutgoingAudio(rawPhone, audioDataUrl, durationSeconds) {
+    const phone = normalizePhone(rawPhone);
+    return addDoc(collection(db, COLLECTION), {
+      phone,
+      fromMe: true,
+      text: "🎤 Mensagem de voz",
+      type: "audio",
+      audioUrl: audioDataUrl,
+      durationSeconds: durationSeconds || 0,
+      pushName: "",
+      messageTimestamp: Date.now(),
+      createdAt: serverTimestamp(),
+      sentFromCRM: true,
+    });
+  }
+
+  return {
+    messages,
+    conversations,
+    loading,
+    error,
+    getMessagesForPhone,
+    logOutgoingMessage,
+    logOutgoingAudio,
+  };
 }

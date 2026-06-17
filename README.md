@@ -13,21 +13,41 @@ Login, navegação por sidebar, conexão real com Firebase (`lcscrm`)
 ### Fase 2 — CRM completo
 Pipeline em Kanban, WhatsApp integrado (envia e recebe via Evolution API), follow-up automático
 
-### Fase 3 — Instagram (esta entrega)
+### Fase 3 — Instagram
 - **Gerador de Post**: legenda com IA (Claude/Anthropic), escolhendo serviço, tom e objetivo
 - **Editor de Fotos**: upload de fotos reais (drag-and-drop), aplicação de estilo visual da marca (6 temas de cor, 3 formatos: post/stories/reels) via Canvas — sem depender de IA de imagem
 - **Banco de Temas**: fotos processadas ficam salvas no Firestore, reutilizáveis em qualquer post, em qualquer dispositivo
 - **Agendamento via Buffer**: publica ou agenda o post (foto + legenda) direto no Instagram
 
+### Melhoria — Áudio no WhatsApp
+- **Enviar áudio**: botão de microfone no chat grava nota de voz (MediaRecorder do navegador) e envia via Evolution API
+- **Receber áudio**: o webhook detecta mensagens de áudio e busca o conteúdo decodificado direto da Evolution API, salvando no Firestore para reprodução imediata no chat (player com play/pause e barra de progresso)
+
+### Melhoria — Classificar conversas direto na Inbox
+- Nova coluna no pipeline: **Funcionário** (ao lado de Lead, Proposta, Contrato, Inativo) — para separar conversas internas de leads de venda
+- Cada conversa na Inbox agora tem um seletor de status visível direto na lista — sem precisar abrir o CRM
+- Ao classificar uma conversa de um número que ainda não tem contato cadastrado, o **contato é criado automaticamente** (usando o nome do WhatsApp quando disponível), já no status escolhido
+
 ## ⚠️ Configuração necessária antes do deploy
 
 ### Variáveis de ambiente na Vercel
-Além das já configuradas na Fase 2 (Evolution API), adicione:
+Importante: como o webhook (`api/whatsapp-webhook.js`) agora também faz chamadas à Evolution API (para buscar áudio), são necessárias as MESMAS credenciais em duas versões — uma com prefixo `VITE_` (usada pelo frontend) e uma sem prefixo (usada pelo servidor):
 
+```
+VITE_EVOLUTION_BASE_URL = https://evolution-api-production-7c15.up.railway.app
+VITE_EVOLUTION_INSTANCE = lcs_crm
+VITE_EVOLUTION_TOKEN    = 251EAE7F1D35-423F-BD4A-5E79555F1521
+
+EVOLUTION_BASE_URL = https://evolution-api-production-7c15.up.railway.app
+EVOLUTION_INSTANCE = lcs_crm
+EVOLUTION_TOKEN     = 251EAE7F1D35-423F-BD4A-5E79555F1521
+```
+
+Além disso (configuradas anteriormente):
 ```
 ANTHROPIC_API_KEY = (gerar em console.anthropic.com → API Keys)
 BUFFER_API_KEY    = 7bapnxk-EY4t_nyw8veZ4x7Gv2j1oWQsiemb8kELYbj
-BLOB_READ_WRITE_TOKEN = (gerar em vercel.com → projeto → Storage → Blob → criar/usar store existente)
+BLOB_READ_WRITE_TOKEN = (gerado automaticamente ao conectar o Blob Store ao projeto)
 ```
 
 **Importante**: essas três variáveis **não** têm prefixo `VITE_` de propósito — elas só devem ser acessíveis dentro das Vercel Functions (pasta `api/`), nunca expostas no código que roda no navegador. Não renomeie.

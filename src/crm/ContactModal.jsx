@@ -8,6 +8,7 @@ const STATUS_OPTIONS = [
   { value: "lead", label: "Lead" },
   { value: "proposta", label: "Proposta" },
   { value: "contrato", label: "Contrato" },
+  { value: "funcionario", label: "Funcionário" },
   { value: "inativo", label: "Inativo" },
 ];
 
@@ -27,7 +28,7 @@ export default function ContactModal({ contact, onClose, onUpdate, onDelete }) {
   });
   const [saving, setSaving] = useState(false);
 
-  const { getMessagesForPhone, logOutgoingMessage } = useWhatsAppMessages();
+  const { getMessagesForPhone, logOutgoingMessage, logOutgoingAudio } = useWhatsAppMessages();
   const phone = form.whatsapp ? normalizePhone(form.whatsapp) : null;
   const messages = phone ? getMessagesForPhone(phone) : [];
 
@@ -180,6 +181,7 @@ export default function ContactModal({ contact, onClose, onUpdate, onDelete }) {
               messages={messages}
               contactName={form.name}
               onSent={(text) => logOutgoingMessage(phone, text)}
+              onSentAudio={(audioUrl, duration) => logOutgoingAudio(phone, audioUrl, duration)}
             />
           </div>
         )}
