@@ -858,3 +858,160 @@ code {
   font-size: 10px;
   padding: 4px 8px;
 }
+
+/* ══════════════ FORM ELEMENTS & BUTTONS (base que faltava) ══════════════ */
+
+label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--navy);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+input, textarea, select {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid var(--gray-light);
+  border-radius: 8px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  color: var(--navy);
+  background: #FAFBFD;
+  outline: none;
+  transition: border-color 0.15s;
+  margin-bottom: 16px;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--blue); background: white; }
+textarea { resize: vertical; min-height: 90px; font-family: inherit; }
+input[type="range"] { padding: 0; background: none; }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+@media (max-width: 700px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+}
+
+/* ── BUTTONS ── */
+.btn {
+  padding: 11px 22px;
+  border-radius: 9px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+.btn-primary { background: var(--blue); color: white; }
+.btn-primary:hover { background: #1344C0; }
+.btn-teal { background: var(--teal); color: white; }
+.btn-teal:hover { background: #0B8A86; }
+.btn-ig {
+  background: linear-gradient(135deg, #F58529, #DD2A7B, #8134AF, #515BD4);
+  color: white;
+}
+.btn-ig:hover { opacity: 0.9; }
+.btn-gads { background: #4285F4; color: white; }
+.btn-gads:hover { background: #2563C0; }
+.btn-outline {
+  background: white;
+  color: var(--navy);
+  border: 1.5px solid var(--gray-light);
+}
+.btn-outline:hover { border-color: var(--blue); color: var(--blue); }
+.btn-sm { padding: 7px 14px; font-size: 12px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+/* ── CHIPS (seleção tipo pílula) ── */
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.chip {
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1.5px solid var(--gray-light);
+  background: white;
+  color: var(--gray);
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.chip:hover { border-color: var(--blue); }
+.chip.selected { border-color: var(--blue); background: var(--light); color: var(--blue); font-weight: 600; }
+
+/* ── OUTPUT BOX (resultado de IA) ── */
+.output-box {
+  background: #F0F4FF;
+  border: 1.5px solid #C7D9FF;
+  border-radius: 10px;
+  padding: 16px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--navy);
+  white-space: pre-wrap;
+  min-height: 60px;
+  position: relative;
+}
+.output-box.loading { color: var(--gray); font-style: italic; }
+.output-box .copy-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid #C7D9FF;
+  background: white;
+  cursor: pointer;
+  color: var(--blue);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── TABS (base que faltava) ── */
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--gray-light);
+  border-radius: 10px;
+  padding: 4px;
+  margin-bottom: 20px;
+  width: fit-content;
+  flex-wrap: wrap;
+}
+.tab {
+  padding: 8px 16px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--gray);
+  transition: all 0.15s;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.tab.active { background: white; color: var(--navy); box-shadow: 0 1px 6px rgba(0,0,0,0.08); }
+.tab:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.followup-card { border-left: 3px solid #D97706; }
