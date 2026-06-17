@@ -1,19 +1,84 @@
+import { useState } from "react";
+import { Sparkles, Image as ImageIcon, Grid3x3 } from "lucide-react";
+import PostGenerator from "../instagram/PostGenerator";
+import PhotoEditor from "../instagram/PhotoEditor";
+import ThemeBank from "../instagram/ThemeBank";
+import { usePosts } from "../instagram/usePosts";
+import { useThemeBank } from "../instagram/useThemeBank";
+
+const TABS = [
+  { id: "generate", label: "Gerar Post", icon: Sparkles },
+  { id: "editor", label: "Editor de Fotos", icon: ImageIcon },
+  { id: "bank", label: "Banco de Temas", icon: Grid3x3 },
+];
+
 export default function InstagramModule() {
+  const [tab, setTab] = useState("generate");
+  const { posts, savePost } = usePosts();
+  const { photos, loading: bankLoading, addPhoto, removePhoto } = useThemeBank();
+
+  async function handleSaveToBank(data) {
+    await addPhoto(data);
+  }
+
   return (
     <div>
       <div className="page-header">
         <div>
           <h1 className="page-title">Instagram</h1>
-          <p className="page-subtitle">Geração de legendas, imagens e agendamento via Buffer</p>
+          <p className="page-subtitle">
+            @lcs_terceirizacao · Legendas com IA, fotos reais e agendamento via Buffer
+          </p>
         </div>
       </div>
-      <div className="card placeholder-card">
-        <p>Este módulo será construído na <strong>Fase 3</strong>.</p>
-        <p className="muted">
-          Vai trazer geração de legendas com IA, criação de imagens, calendário de posts
-          e envio automático para o Buffer — migrado do app atual.
-        </p>
+
+      <div className="stat-grid" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+        <div className="stat-card accent-pink">
+          <div className="stat-icon"><Sparkles size={20} /></div>
+          <div>
+            <div className="stat-label">Posts criados</div>
+            <div className="stat-value">{posts.length}</div>
+          </div>
+        </div>
+        <div className="stat-card accent-blue">
+          <div className="stat-icon"><ImageIcon size={20} /></div>
+          <div>
+            <div className="stat-label">Fotos no banco</div>
+            <div className="stat-value">{photos.length}</div>
+          </div>
+        </div>
+        <div className="stat-card accent-teal">
+          <div className="stat-icon"><Grid3x3 size={20} /></div>
+          <div>
+            <div className="stat-label">Agendados</div>
+            <div className="stat-value">
+              {posts.filter((p) => p.status === "agendado").length}
+            </div>
+          </div>
+        </div>
       </div>
+
+      <div className="tabs crm-tabs">
+        {TABS.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            className={"tab" + (tab === id ? " active" : "")}
+            onClick={() => setTab(id)}
+          >
+            <Icon size={14} /> {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "generate" && (
+        <PostGenerator themeBankPhotos={photos} onSavePost={savePost} />
+      )}
+
+      {tab === "editor" && <PhotoEditor onSaveToBank={handleSaveToBank} />}
+
+      {tab === "bank" && (
+        <ThemeBank photos={photos} loading={bankLoading} onRemove={removePhoto} />
+      )}
     </div>
   );
 }

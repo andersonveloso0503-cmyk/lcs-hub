@@ -785,3 +785,76 @@ code {
   font-size: 16px;
   margin-left: 2px;
 }
+
+/* ══════════════ INSTAGRAM MODULE ══════════════ */
+
+.upload-dropzone {
+  border: 2px dashed var(--gray-light);
+  border-radius: 12px;
+  padding: 36px 20px;
+  text-align: center;
+  cursor: pointer;
+  color: var(--gray);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.upload-dropzone:hover {
+  border-color: var(--blue);
+  background: var(--light);
+}
+
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+.photo-card {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #F1F5F9;
+  aspect-ratio: 1;
+  display: flex;
+  flex-direction: column;
+}
+.photo-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.photo-card.selectable {
+  cursor: pointer;
+  border: 3px solid transparent;
+  transition: border-color 0.15s;
+}
+.photo-card.selectable:hover { border-color: var(--gray-light); }
+.photo-card.selectable.selected { border-color: var(--blue); }
+.photo-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(13,27,42,0.65);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 2;
+}
+.photo-download {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  background: white;
+  z-index: 2;
+  font-size: 10px;
+  padding: 4px 8px;
+}

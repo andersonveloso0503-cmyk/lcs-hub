@@ -3,7 +3,7 @@
 
 const EVOLUTION_BASE_URL = import.meta.env.VITE_EVOLUTION_BASE_URL ||
   "https://evolution-api-production-7c15.up.railway.app";
-const EVOLUTION_INSTANCE = import.meta.env.VITE_EVOLUTION_INSTANCE || "lcscrm";
+const EVOLUTION_INSTANCE = import.meta.env.VITE_EVOLUTION_INSTANCE || "lcs_crm";
 const EVOLUTION_TOKEN = import.meta.env.VITE_EVOLUTION_TOKEN || "";
 
 /**
