@@ -1,19 +1,19 @@
-import { createContext, useContext, useState, useEffect } from "react";
-
-const AuthContext = createContext(null);
+import { useState } from "react";
+import { AuthContext } from "./authContextDef";
 
 const ADMIN_PASSWORD = "invictos2015"; // mesmo padrão usado nos outros apps LCS
 const STORAGE_KEY = "lcs_hub_auth";
 
-export function AuthProvider({ children }) {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [loading, setLoading] = useState(true);
+function readInitialAuth() {
+  try {
+    return localStorage.getItem(STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
 
-  useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === "true") setIsAuthenticated(true);
-    setLoading(false);
-  }, []);
+export function AuthProvider({ children }) {
+  const [isAuthenticated, setIsAuthenticated] = useState(readInitialAuth);
 
   function login(password) {
     if (password === ADMIN_PASSWORD) {
@@ -30,14 +30,8 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, loading, login, logout }}>
+    <AuthContext.Provider value={{ isAuthenticated, loading: false, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth deve ser usado dentro de AuthProvider");
-  return ctx;
 }

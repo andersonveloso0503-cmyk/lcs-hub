@@ -1,39 +1,19 @@
-import { useEffect, useState } from "react";
-import { collection, getDocs } from "firebase/firestore";
-import { db } from "../firebase/config";
-import { Users, Instagram, Search, TrendingUp } from "lucide-react";
+import { Users, Search, AlertCircle, MessageCircle } from "lucide-react";
+import { Link } from "react-router-dom";
+import { useContacts } from "../crm/useContacts";
+import { getPendingFollowUps } from "../crm/followUp";
+import { useWhatsAppMessages } from "../crm/useWhatsAppMessages";
 
 export default function Dashboard() {
-  const [stats, setStats] = useState({
-    contacts: null,
-    opportunities: null,
-    posts: null,
-  });
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const { contacts, loading, error } = useContacts();
+  const { conversations } = useWhatsAppMessages();
 
-  useEffect(() => {
-    async function loadStats() {
-      try {
-        const [contactsSnap, oppsSnap, postsSnap] = await Promise.all([
-          getDocs(collection(db, "contacts")).catch(() => null),
-          getDocs(collection(db, "opportunities")).catch(() => null),
-          getDocs(collection(db, "posts")).catch(() => null),
-        ]);
-
-        setStats({
-          contacts: contactsSnap ? contactsSnap.size : 0,
-          opportunities: oppsSnap ? oppsSnap.size : 0,
-          posts: postsSnap ? postsSnap.size : 0,
-        });
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadStats();
-  }, []);
+  const pendingFollowUps = getPendingFollowUps(contacts);
+  const byStatus = {
+    lead: contacts.filter((c) => (c.status || "lead") === "lead").length,
+    proposta: contacts.filter((c) => c.status === "proposta").length,
+    contrato: contacts.filter((c) => c.status === "contrato").length,
+  };
 
   return (
     <div>
@@ -61,19 +41,19 @@ export default function Dashboard() {
         <StatCard
           icon={Users}
           label="Contatos no CRM"
-          value={loading ? "—" : stats.contacts}
+          value={loading ? "—" : contacts.length}
           accent="blue"
         />
         <StatCard
-          icon={TrendingUp}
-          label="Oportunidades"
-          value={loading ? "—" : stats.opportunities}
-          accent="teal"
+          icon={AlertCircle}
+          label="Follow-up pendente"
+          value={loading ? "—" : pendingFollowUps.length}
+          accent={pendingFollowUps.length > 0 ? "amber" : "teal"}
         />
         <StatCard
-          icon={Instagram}
-          label="Posts criados"
-          value={loading ? "—" : stats.posts}
+          icon={MessageCircle}
+          label="Conversas no WhatsApp"
+          value={conversations.length}
           accent="pink"
         />
         <StatCard
@@ -86,9 +66,39 @@ export default function Dashboard() {
       </div>
 
       <div className="card">
+        <h3 className="card-title">Pipeline de vendas</h3>
+        <div className="pipeline-mini">
+          <MiniStat label="Lead" value={byStatus.lead} color="#1A56DB" />
+          <MiniStat label="Proposta" value={byStatus.proposta} color="#D97706" />
+          <MiniStat label="Contrato" value={byStatus.contrato} color="#0EA5A0" />
+        </div>
+        <Link to="/crm" className="btn btn-outline btn-sm" style={{ marginTop: 14 }}>
+          Ver pipeline completo →
+        </Link>
+      </div>
+
+      {pendingFollowUps.length > 0 && (
+        <div className="card">
+          <h3 className="card-title">
+            <AlertCircle size={15} style={{ marginRight: 6, verticalAlign: "-2px" }} />
+            Follow-up pendente
+          </h3>
+          <ul className="roadmap-list">
+            {pendingFollowUps.slice(0, 5).map((c) => (
+              <li key={c.id}>
+                <strong>{c.name || "Sem nome"}</strong> — {c._daysSinceContact} dias sem contato
+              </li>
+            ))}
+          </ul>
+          <Link to="/crm" className="btn btn-teal btn-sm" style={{ marginTop: 14 }}>
+            Resolver agora →
+          </Link>
+        </div>
+      )}
+
+      <div className="card">
         <h3 className="card-title">Próximos módulos</h3>
         <ul className="roadmap-list">
-          <li><strong>CRM</strong> — contatos, pipeline e propostas (Fase 2)</li>
           <li><strong>Instagram</strong> — legendas, imagens e Buffer (Fase 3)</li>
           <li><strong>Google Ads</strong> — otimização com IA e dados reais (Fase 4)</li>
         </ul>
@@ -108,6 +118,16 @@ function StatCard({ icon: Icon, label, value, accent, note }) {
         <div className="stat-value">{value}</div>
         {note && <div className="stat-note">{note}</div>}
       </div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value, color }) {
+  return (
+    <div className="mini-stat">
+      <span className="mini-stat-dot" style={{ background: color }} />
+      <span className="mini-stat-label">{label}</span>
+      <span className="mini-stat-value">{value}</span>
     </div>
   );
 }
