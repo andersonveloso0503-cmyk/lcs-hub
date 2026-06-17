@@ -30,6 +30,17 @@ export async function uploadImage(dataUrl, filename) {
   }
 }
 
+export async function generateWeek() {
+  try {
+    const res = await fetch("/api/generate-week", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) return { ok: false, error: data.error || "Erro ao gerar a semana" };
+    return { ok: true, posts: data.posts };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 export async function scheduleToBuffer({ text, imageUrl, scheduledAt }) {
   try {
     const res = await fetch("/api/buffer-schedule", {

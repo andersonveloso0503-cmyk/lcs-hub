@@ -28,6 +28,13 @@ Pipeline em Kanban, WhatsApp integrado (envia e recebe via Evolution API), follo
 - Cada conversa na Inbox agora tem um seletor de status visível direto na lista — sem precisar abrir o CRM
 - Ao classificar uma conversa de um número que ainda não tem contato cadastrado, o **contato é criado automaticamente** (usando o nome do WhatsApp quando disponível), já no status escolhido
 
+### Melhoria — Planejamento Semanal Automático (Instagram)
+- Nova aba **Semana Automática**, primeira do módulo Instagram
+- Um clique gera os 7 posts da semana de uma vez: a IA escreve as 7 legendas (variando serviço, tom e objetivo dia a dia), escolhe uma foto do Banco de Temas para cada uma (evitando repetir foto quando há fotos suficientes), e sugere o dia/horário de publicação
+- Você revisa visualmente todos os 7 cards (pode editar a legenda de cada um, ou trocar a foto sugerida)
+- Um clique final ("Aprovar e agendar") envia todos os 7 posts para o Buffer, já agendados nos respectivos dias/horários — sem precisar publicar manualmente todo dia
+- O agendamento sempre aponta para a próxima segunda-feira em diante (semana cheia, de segunda a domingo)
+
 ## ⚠️ Configuração necessária antes do deploy
 
 ### Variáveis de ambiente na Vercel

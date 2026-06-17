@@ -1,19 +1,21 @@
 import { useState } from "react";
-import { Sparkles, Image as ImageIcon, Grid3x3 } from "lucide-react";
+import { Sparkles, Image as ImageIcon, Grid3x3, CalendarDays } from "lucide-react";
 import PostGenerator from "../instagram/PostGenerator";
 import PhotoEditor from "../instagram/PhotoEditor";
 import ThemeBank from "../instagram/ThemeBank";
+import WeeklyPlanner from "../instagram/WeeklyPlanner";
 import { usePosts } from "../instagram/usePosts";
 import { useThemeBank } from "../instagram/useThemeBank";
 
 const TABS = [
+  { id: "week", label: "Semana Automática", icon: CalendarDays },
   { id: "generate", label: "Gerar Post", icon: Sparkles },
   { id: "editor", label: "Editor de Fotos", icon: ImageIcon },
   { id: "bank", label: "Banco de Temas", icon: Grid3x3 },
 ];
 
 export default function InstagramModule() {
-  const [tab, setTab] = useState("generate");
+  const [tab, setTab] = useState("week");
   const { posts, savePost } = usePosts();
   const { photos, loading: bankLoading, addPhoto, removePhoto } = useThemeBank();
 
@@ -69,6 +71,10 @@ export default function InstagramModule() {
           </button>
         ))}
       </div>
+
+      {tab === "week" && (
+        <WeeklyPlanner themeBankPhotos={photos} onSavePost={savePost} />
+      )}
 
       {tab === "generate" && (
         <PostGenerator themeBankPhotos={photos} onSavePost={savePost} />

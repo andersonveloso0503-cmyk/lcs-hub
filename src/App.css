@@ -1141,3 +1141,79 @@ input[type="range"] { padding: 0; background: none; }
 .inbox-status-select.status-contrato { border-color: #8FE0DC; background: #ECFEFF; color: #0B8A86; }
 .inbox-status-select.status-funcionario { border-color: #C4B5FD; background: #F5F3FF; color: #6D28D9; }
 .inbox-status-select.status-inativo { border-color: var(--gray-light); background: #F8FAFC; color: var(--gray); }
+
+/* ══════════════ PLANEJAMENTO SEMANAL ══════════════ */
+
+.week-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.week-card {
+  background: white;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.week-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.week-card-day {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+}
+.week-card-time {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--gray);
+}
+.week-card-photo {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #F1F5F9;
+}
+.week-card-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.week-card-no-photo {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gray);
+}
+.week-card-change-photo {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  background: rgba(13,27,42,0.7);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.week-card-caption {
+  font-size: 12.5px;
+  min-height: 110px;
+  margin-bottom: 0;
+}
