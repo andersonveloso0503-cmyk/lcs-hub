@@ -280,8 +280,43 @@ code {
 @media (max-width: 768px) {
   .app-body { grid-template-columns: 1fr; }
   .sidebar { display: none; }
-  .content { padding: 16px; }
+  .content {
+    padding: 16px;
+    padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  }
   .stat-grid { grid-template-columns: 1fr 1fr; }
+
+  .bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: white;
+    border-top: 1px solid var(--gray-light);
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+    z-index: 200;
+    box-shadow: 0 -2px 12px rgba(13,27,42,0.06);
+  }
+  .bottom-nav-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 6px 2px;
+    text-decoration: none;
+    color: var(--gray);
+    font-size: 10.5px;
+    font-weight: 500;
+    border-radius: 10px;
+  }
+  .bottom-nav-item.active { color: var(--blue); font-weight: 700; }
+}
+
+/* ── BOTTOM NAV (escondida fora do breakpoint mobile) ── */
+.bottom-nav {
+  display: none;
 }
 
 /* ══════════════ CRM MODULE ══════════════ */
@@ -1184,6 +1219,18 @@ input[type="range"] { padding: 0; background: none; }
   overflow: hidden;
   background: #F1F5F9;
 }
+.week-card-photo.stories-ratio {
+  aspect-ratio: 9 / 16;
+}
+.week-card-format-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+  width: fit-content;
+}
+.week-card-format-badge.post { background: #EFF6FF; color: var(--blue); }
+.week-card-format-badge.stories { background: #F5F3FF; color: #6D28D9; }
 .week-card-photo img {
   width: 100%;
   height: 100%;

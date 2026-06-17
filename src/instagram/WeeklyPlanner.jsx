@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Sparkles, Calendar, Send, RefreshCw, Image as ImageIcon } from "lucide-react";
 import { generateWeek, uploadImage, scheduleToBuffer } from "./api";
 import { attachScheduleDates, formatScheduledDate } from "./weekSchedule";
+import { adaptToStoriesFormat } from "./photoStyle";
 
 export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
   const [posts, setPosts] = useState([]); // { day, service, caption, suggestedTime, scheduledAt, photoId }
@@ -37,11 +38,19 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
 
     const withDates = attachScheduleDates(result.posts);
     const usedIds = new Set();
-    const withPhotos = withDates.map((p) => {
-      const photo = pickPhotoForService(p.service, usedIds);
-      if (photo) usedIds.add(photo.id);
-      return { ...p, photoId: photo?.id || null, photoUrl: photo?.imageDataUrl || null };
-    });
+    const withPhotos = await Promise.all(
+      withDates.map(async (p) => {
+        const photo = pickPhotoForService(p.service, usedIds);
+        if (photo) usedIds.add(photo.id);
+
+        let photoUrl = photo?.imageDataUrl || null;
+        if (photoUrl && p.format === "stories") {
+          photoUrl = await adaptToStoriesFormat(photoUrl, photo?.theme || "azul");
+        }
+
+        return { ...p, photoId: photo?.id || null, photoUrl };
+      })
+    );
 
     setPosts(withPhotos);
     setGenerating(false);
@@ -68,6 +77,7 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
     setSendingAll(true);
     setSentCount(0);
     setError("");
+    const warnings = [];
 
     for (const post of posts) {
       if (!post.photoUrl) continue;
@@ -84,7 +94,7 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
         scheduledAt: post.scheduledAt,
       });
 
-      if (result.ok) {
+      if (result.ok || result.partial) {
         await onSavePost({
           service: post.service,
           caption: post.caption,
@@ -93,9 +103,18 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
           scheduledAt: post.scheduledAt,
         });
         setSentCount((c) => c + 1);
+
+        if (result.partial) {
+          const failed = result.results?.filter((r) => !r.ok).map((r) => r.channel).join(", ");
+          warnings.push(`${post.day}: publicado parcialmente (falhou em: ${failed})`);
+        }
       } else {
         setError(`Erro ao agendar ${post.day}: ${result.error}`);
       }
+    }
+
+    if (warnings.length > 0) {
+      setError(warnings.join(" · "));
     }
 
     setSendingAll(false);
@@ -144,12 +163,15 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
             <div key={i} className="week-card">
               <div className="week-card-header">
                 <span className="week-card-day">{post.day}</span>
+                <span className={"week-card-format-badge " + post.format}>
+                  {post.format === "stories" ? "📱 Stories" : "🖼️ Post"}
+                </span>
                 <span className="week-card-time">
                   <Calendar size={12} /> {formatScheduledDate(post.scheduledAt)}
                 </span>
               </div>
 
-              <div className="week-card-photo">
+              <div className={"week-card-photo" + (post.format === "stories" ? " stories-ratio" : "")}>
                 {post.photoUrl ? (
                   <img src={post.photoUrl} alt={post.service} />
                 ) : (

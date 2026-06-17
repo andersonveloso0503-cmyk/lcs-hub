@@ -55,6 +55,22 @@ export default function AppLayout() {
           <Outlet />
         </main>
       </div>
+
+      <nav className="bottom-nav">
+        {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={end}
+            className={({ isActive }) =>
+              "bottom-nav-item" + (isActive ? " active" : "")
+            }
+          >
+            <Icon size={20} />
+            <span>{label}</span>
+          </NavLink>
+        ))}
+      </nav>
     </div>
   );
 }

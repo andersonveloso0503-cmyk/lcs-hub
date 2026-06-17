@@ -41,16 +41,24 @@ export async function generateWeek() {
   }
 }
 
-export async function scheduleToBuffer({ text, imageUrl, scheduledAt }) {
+export async function scheduleToBuffer({ text, imageUrl, scheduledAt, channels }) {
   try {
     const res = await fetch("/api/buffer-schedule", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, imageUrl, scheduledAt }),
+      body: JSON.stringify({ text, imageUrl, scheduledAt, channels }),
     });
     const data = await res.json();
-    if (!res.ok) return { ok: false, error: data.error || "Erro ao agendar no Buffer" };
-    return { ok: true, post: data.post };
+
+    if (res.status === 502) {
+      const errorMsg = data.results
+        ? data.results.map((r) => `${r.channel}: ${r.error}`).join(" | ")
+        : data.error || "Erro ao agendar no Buffer";
+      return { ok: false, error: errorMsg };
+    }
+
+    // 200 (sucesso total) ou 207 (parcial - ex: Instagram ok, Facebook não configurado)
+    return { ok: data.ok, partial: data.partial, results: data.results };
   } catch (err) {
     return { ok: false, error: err.message };
   }

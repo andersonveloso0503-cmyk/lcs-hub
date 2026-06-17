@@ -45,11 +45,13 @@ Regras para cada legenda:
 - Escreva em português brasileiro, de forma natural e humana
 - Tamanho ideal: 3 a 5 linhas de texto principal por legenda
 
+Além disso, escolha o formato de publicação de cada dia entre "post" (feed, formato quadrado) ou "stories" (vertical, mais casual e efêmero). Use o bom senso: a maioria dos dias deve ser "post" (de 5 a 6 dos 7 dias), e apenas 1 ou 2 dias na semana devem ser "stories" — escolha os dias de stories pensando em conteúdo mais leve, rápido ou de bastidores (ex: dica rápida, lembrete, enquete), e deixe os posts de feed para conteúdo institucional ou de maior permanência.
+
 Responda APENAS em formato JSON válido, sem markdown, sem texto antes ou depois, seguindo exatamente esta estrutura:
 {
   "posts": [
-    { "day": "Segunda-feira", "service": "Limpeza e Conservação", "caption": "texto da legenda completa aqui" },
-    ... (7 itens no total, um por dia)
+    { "day": "Segunda-feira", "service": "Limpeza e Conservação", "format": "post", "caption": "texto da legenda completa aqui" },
+    ... (7 itens no total, um por dia, campo "format" sempre "post" ou "stories")
   ]
 }`;
 

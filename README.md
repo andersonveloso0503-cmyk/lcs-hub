@@ -31,11 +31,25 @@ Pipeline em Kanban, WhatsApp integrado (envia e recebe via Evolution API), follo
 ### Melhoria — Planejamento Semanal Automático (Instagram)
 - Nova aba **Semana Automática**, primeira do módulo Instagram
 - Um clique gera os 7 posts da semana de uma vez: a IA escreve as 7 legendas (variando serviço, tom e objetivo dia a dia), escolhe uma foto do Banco de Temas para cada uma (evitando repetir foto quando há fotos suficientes), e sugere o dia/horário de publicação
+- A IA também decide o **formato de cada dia** (post ou stories) — a maioria fica como post de feed, e 1-2 dias na semana viram stories, pensados para conteúdo mais leve. Fotos quadradas existentes são automaticamente adaptadas ao formato vertical de stories sem precisar reprocessar a foto original
 - Você revisa visualmente todos os 7 cards (pode editar a legenda de cada um, ou trocar a foto sugerida)
 - Um clique final ("Aprovar e agendar") envia todos os 7 posts para o Buffer, já agendados nos respectivos dias/horários — sem precisar publicar manualmente todo dia
 - O agendamento sempre aponta para a próxima segunda-feira em diante (semana cheia, de segunda a domingo)
 
-## ⚠️ Configuração necessária antes do deploy
+### Melhoria — Publicação simultânea no Facebook
+- Tanto o Gerador de Post quanto a Semana Automática agora publicam automaticamente em **Instagram E Facebook** ao mesmo tempo, mesmo conteúdo
+- Requer conectar a página do Facebook da LCS como canal no Buffer e configurar `FACEBOOK_CHANNEL_ID` (veja abaixo)
+- Caso o Facebook ainda não esteja configurado, o sistema publica normalmente no Instagram e avisa que o Facebook ficou pendente, sem travar o fluxo
+
+### Melhoria — App instalável no celular (PWA)
+- O LCS Hub agora pode ser instalado como app no celular, com ícone na tela inicial e abertura em tela cheia (sem barra de endereço do navegador) — igual aos outros apps da LCS (Invictos FC, Volei Tche)
+- Nova barra de navegação inferior fixa, visível só em telas pequenas, com acesso direto a Dashboard, CRM, Instagram e Google Ads
+- **Como instalar**: abra `lcs-hub.vercel.app` no navegador do celular → no Android (Chrome), toque no menu (⋮) → "Adicionar à tela inicial" ou "Instalar app"; no iPhone (Safari), toque no ícone de compartilhar → "Adicionar à Tela de Início"
+
+## ⚠️ Correção crítica — Buffer API (endpoint e sintaxe estavam errados)
+Durante os testes reais, descobrimos que o endpoint usado até aqui (`graph.buffer.com`) estava incorreto — a documentação oficial atual confirma que o endpoint correto é **`api.buffer.com`**, com uma sintaxe de mutation diferente (union type `PostActionSuccess`/`MutationError`, imagem via `assets: [{ image: { url } }]`, agendamento via `mode: customScheduled` + `dueAt`). O `api/buffer-schedule.js` foi totalmente reescrito seguindo a documentação oficial confirmada em `developers.buffer.com`. Também corrigimos um erro de digitação no Channel ID do Instagram (era `c487`, o correto é `c687`), confirmado consultando a API em tempo real.
+
+**Recomendação**: teste um post simples primeiro (Gerador de Post, sem agendamento, "Publicar agora") antes de usar a Semana Automática, para confirmar que a integração está funcionando de ponta a ponta.
 
 ### Variáveis de ambiente na Vercel
 Importante: como o webhook (`api/whatsapp-webhook.js`) agora também faz chamadas à Evolution API (para buscar áudio), são necessárias as MESMAS credenciais em duas versões — uma com prefixo `VITE_` (usada pelo frontend) e uma sem prefixo (usada pelo servidor):
@@ -56,6 +70,14 @@ ANTHROPIC_API_KEY = (gerar em console.anthropic.com → API Keys)
 BUFFER_API_KEY    = 7bapnxk-EY4t_nyw8veZ4x7Gv2j1oWQsiemb8kELYbj
 BLOB_READ_WRITE_TOKEN = (gerado automaticamente ao conectar o Blob Store ao projeto)
 ```
+
+### Configurar o Facebook como segundo canal
+1. No Buffer, conecte a página do Facebook da LCS como um novo canal
+2. Descubra o Channel ID dela consultando a API do Buffer (mesmo processo usado para o Instagram)
+3. Adicione na Vercel: `FACEBOOK_CHANNEL_ID = (o ID encontrado)`
+4. Redeploy
+
+Sem esse passo, os posts continuam indo normalmente só para o Instagram — nada quebra, só o Facebook fica pendente até ser configurado.
 
 **Importante**: essas três variáveis **não** têm prefixo `VITE_` de propósito — elas só devem ser acessíveis dentro das Vercel Functions (pasta `api/`), nunca expostas no código que roda no navegador. Não renomeie.
 

@@ -84,8 +84,12 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
       scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : null,
     });
 
-    if (result.ok) {
-      setSendResult({ ok: true });
+    if (result.ok || result.partial) {
+      setSendResult({ ok: true, partial: result.partial });
+      if (result.partial) {
+        const failed = result.results?.filter((r) => !r.ok).map((r) => r.channel).join(", ");
+        setError(`Publicado parcialmente — falhou em: ${failed}`);
+      }
       await onSavePost({
         service,
         caption,

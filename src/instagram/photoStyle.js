@@ -100,3 +100,39 @@ export function applyStyle(img, themeKey, format, opacity = 0.85, contactLine = 
 
   return canvas.toDataURL("image/png");
 }
+
+/**
+ * Adapta uma imagem já estilizada (ex: post quadrado) para o formato Stories,
+ * centralizando-a sobre um fundo da cor do tema — sem precisar reprocessar
+ * a foto original. Útil quando o Banco de Temas só tem fotos em outro formato.
+ */
+export function adaptToStoriesFormat(imageDataUrl, themeKey) {
+  return new Promise((resolve) => {
+    const theme = STYLE_THEMES[themeKey] || STYLE_THEMES.azul;
+    const size = FORMAT_SIZES.stories;
+
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = size.w;
+      canvas.height = size.h;
+      const ctx = canvas.getContext("2d");
+
+      // Fundo sólido na cor do tema
+      ctx.fillStyle = theme.bg;
+      ctx.fillRect(0, 0, size.w, size.h);
+
+      // Centraliza a imagem original (mantendo proporção, sem cortar)
+      const scale = Math.min(size.w / img.width, (size.h * 0.75) / img.height);
+      const drawW = img.width * scale;
+      const drawH = img.height * scale;
+      const offsetX = (size.w - drawW) / 2;
+      const offsetY = (size.h - drawH) / 2;
+
+      ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
+
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.src = imageDataUrl;
+  });
+}
