@@ -105,7 +105,7 @@ export default function Dashboard() {
         <ul className="roadmap-list">
           <li><strong>CRM</strong> — pipeline, WhatsApp (texto e áudio), follow-up automático</li>
           <li><strong>Instagram</strong> — legendas com IA, editor de fotos, semana automática, Buffer (Instagram + Facebook)</li>
-          <li><strong>Google Ads</strong> — em construção (Fase 4)</li>
+          <li><strong>Google Ads</strong> — estrutura real das campanhas (32 campanhas, conta 3371725537); métricas e LCS Score pendentes de aprovação da API oficial</li>
         </ul>
       </div>
     </div>

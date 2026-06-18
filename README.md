@@ -5,6 +5,32 @@ Plataforma única que unifica os três projetos da LCS Terceirização:
 - **Instagram** (legendas, fotos reais, agendamento) — antes em `lcsi-nstagram`
 - **Google Ads** (otimização com IA) — antes em `lcs-optimizer`
 
+## Status: Fase 5 em andamento 🟡
+
+### Fase 5 — Google Ads (estrutura real, métricas pendentes)
+Módulo Google Ads reconstruído (`src/pages/GoogleAdsModule.jsx`), substituindo o placeholder
+anterior. Mostra dados reais de estrutura das campanhas (32 campanhas, conta `3371725537`):
+nome, status, tipo, orçamento diário, estratégia de lance e data de início — com destaque para
+campanhas ativas no topo e uma lista colapsável "Todas as campanhas" com filtro por status.
+
+**Limitação importante, avisada na interface**: o developer token oficial do Google Ads API
+ainda está em status "Test Account" (Basic Access rejeitado por inconsistência de domínio —
+reenviado em junho/2026, aprovação pendente). Por isso, ainda não há métricas de performance
+(cliques, custo, conversões), e o LCS Score e as sugestões de otimização por IA estão propositalmente
+desativados até que esses dados existam — a interface deixa isso explícito, em vez de simular um
+score fictício baseado só em estrutura.
+
+**Arquitetura provisória**: como o Supermetrics (usado para ler a estrutura via Claude) não é uma
+API que o código do app possa chamar diretamente, os dados de campanha são gravados manualmente
+no Firestore (`google_ads_snapshot/current`, via `api/google-ads-update-snapshot.js`, protegido
+por `UPDATE_SECRET`) sempre que precisam ser atualizados, e o app lê esse snapshot em tempo real
+via `useGoogleAdsSnapshot()`. Quando a Basic Access for aprovada, essa fonte pode ser trocada por
+uma chamada direta à API oficial, sem alterar os componentes visuais.
+
+Novas variáveis de ambiente: `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`
+(credenciais do Firebase Admin SDK, para escrita server-side no Firestore) e `UPDATE_SECRET`
+(chave simples para proteger o endpoint de atualização do snapshot).
+
 ## Status: Fase 3 concluída ✅
 
 ### Fase 1 — Esqueleto
@@ -152,7 +178,9 @@ api/
 ├── whatsapp-webhook.js     # recebe mensagens da Evolution API (Fase 2)
 ├── generate-caption.js     # gera legenda de Instagram via Claude API
 ├── upload-image.js         # upload de imagem para Vercel Blob
-└── buffer-schedule.js      # agenda/publica post no Instagram via Buffer
+├── buffer-schedule.js      # agenda/publica post no Instagram via Buffer
+├── firebaseAdmin.js        # inicializa Firebase Admin SDK (escrita server-side)
+└── google-ads-update-snapshot.js  # grava snapshot de campanhas no Firestore (Fase 5)
 
 src/
 ├── firebase/config.js      # conexão com o Firebase "lcscrm"
@@ -167,11 +195,13 @@ src/
 │   ├── PhotoEditor.jsx         # upload + aplicação de estilo
 │   ├── ThemeBank.jsx           # galeria de fotos processadas
 │   └── PostGenerator.jsx       # legenda com IA + seleção de foto + envio ao Buffer
+├── googleads/
+│   └── useGoogleAdsSnapshot.js  # hook Firestore para o snapshot de campanhas (tempo real)
 ├── pages/
 │   ├── Dashboard.jsx        # visão geral com dados reais do CRM
 │   ├── CRM.jsx              # página principal do CRM
 │   ├── InstagramModule.jsx  # página principal do Instagram (junta tudo)
-│   └── GoogleAdsModule.jsx  # placeholder — Fase 4
+│   └── GoogleAdsModule.jsx  # dashboard de campanhas (Fase 5 — estrutura real, métricas pendentes)
 └── App.jsx
 ```
 
@@ -181,8 +211,12 @@ src/
 - `whatsapp_messages` — mensagens trocadas via WhatsApp
 - `posts` — posts do Instagram (legenda, imagem, status: rascunho/agendado/publicado)
 - `theme_bank` — fotos processadas no Editor de Fotos, reutilizáveis
+- `google_ads_snapshot` — snapshot manual da estrutura de campanhas do Google Ads (documento único: `current`)
 
 ## Próximas fases
 
-- **Fase 4** — Módulo Google Ads: conexão real com a Google Ads API, LCS Score, otimizações com IA
+- **Fase 5 (continuação)** — quando a Basic Access da Google Ads API for aprovada: trocar a
+  fonte de dados do snapshot manual para chamada direta à API oficial; ativar LCS Score e
+  sugestões de otimização por IA; adicionar ações aplicáveis pelo app (pausar/ativar campanha,
+  ajustar orçamento, negative keywords)
 - **Futuro** — Agente de IA para atender o WhatsApp automaticamente
