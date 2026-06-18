@@ -8,6 +8,11 @@
 // Mídia (áudio, imagem, documento/PDF) é enviada para o Vercel Blob e só a URL
 // é salva no Firestore — documentos do Firestore têm limite de 1MB, e arquivos
 // de mídia (especialmente PDFs de currículo) costumam passar disso facilmente.
+//
+// NOVO: depois de salvar e classificar a mensagem, o webhook também roda o
+// agente de atendimento automático (api/lib/botFlow.js) — que conduz o menu
+// principal (Cliente / Funcionário / Orçamento / Currículo / Vendas) e envia
+// as respostas via Evolution API (api/lib/sendWhatsApp.js).
 
 import { initializeApp, getApps } from "firebase/app";
 import {
@@ -20,9 +25,13 @@ import {
   getDocs,
   updateDoc,
   doc,
+  getDoc,
+  setDoc,
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
 import { detectStatusFromMessage, canAutoReclassify } from "./lib/classifyMessage.js";
+import { processMessage, curriculoRecebidoMensagem } from "./lib/botFlow.js";
+import { sendTextSequence, sendDocumentFromUrl } from "./lib/sendWhatsApp.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
@@ -39,6 +48,16 @@ const EVOLUTION_BASE_URL =
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "lcs_crm";
 const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || "251EAE7F1D35-423F-BD4A-5E79555F1521";
 
+// URL pública (Vercel Blob) do PDF de apresentação da empresa, enviado
+// automaticamente ao final do fluxo de orçamento. Configurar depois de subir
+// o arquivo (ver README, seção "Agente de IA no WhatsApp").
+const EMPRESA_PRESENTATION_URL = process.env.EMPRESA_PRESENTATION_URL || "";
+
+// Status que, se já estiverem no contato, fazem o agente de IA ficar
+// completamente em silêncio (o atendimento já é humano) — diferente de
+// "funcionario", que continua usando o submenu de autoatendimento.
+const BOT_SKIP_STATUSES = ["cliente", "contrato"];
+
 function getDb() {
   const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
   return getFirestore(app);
@@ -48,7 +67,7 @@ function getDb() {
  * Aplica a classificação automática de status a partir do conteúdo de uma
  * mensagem recebida. Cria o contato se ele ainda não existir, ou atualiza o
  * status de um contato existente — respeitando os status protegidos
- * (contrato, funcionario), que nunca são sobrescritos automaticamente.
+ * (contrato, cliente, funcionario), que nunca são sobrescritos automaticamente.
  */
 async function applyAutoClassification({ db, phone, pushName, text, type, fileName }) {
   const newStatus = detectStatusFromMessage({ text, type, fileName });
@@ -59,7 +78,6 @@ async function applyAutoClassification({ db, phone, pushName, text, type, fileNa
   const snap = await getDocs(q);
 
   if (snap.empty) {
-    // Nenhum contato ainda para esse número — cria um novo já classificado.
     await addDoc(contactsRef, {
       name: pushName || "",
       whatsapp: phone,
@@ -76,17 +94,129 @@ async function applyAutoClassification({ db, phone, pushName, text, type, fileNa
   const existing = snap.docs[0];
   const currentStatus = existing.data().status || "";
 
-  if (!canAutoReclassify(currentStatus)) {
-    // Status protegido (contrato/funcionario) — não sobrescreve.
-    return;
-  }
-
+  if (!canAutoReclassify(currentStatus)) return;
   if (currentStatus === newStatus) return;
 
   await updateDoc(doc(db, "contacts", existing.id), {
     status: newStatus,
     lastContactAt: serverTimestamp(),
   });
+}
+
+/**
+ * Busca o contato do CRM pelo telefone. Devolve { id, ...data } ou null.
+ */
+async function findContactByPhone(db, phone) {
+  const contactsRef = collection(db, "contacts");
+  const q = query(contactsRef, where("whatsapp", "==", phone));
+  const snap = await getDocs(q);
+  if (snap.empty) return null;
+  return { id: snap.docs[0].id, ...snap.docs[0].data() };
+}
+
+/**
+ * Cria ou atualiza o contato a partir de uma decisão do agente de IA (ex:
+ * pessoa escolheu "Sou Cliente" ou "Sou Funcionário" no menu). Respeita os
+ * mesmos status protegidos da classificação por palavra-chave.
+ */
+async function upsertContactFromBot(db, phone, pushName, status, extraFields = {}) {
+  const contactsRef = collection(db, "contacts");
+  const q = query(contactsRef, where("whatsapp", "==", phone));
+  const snap = await getDocs(q);
+
+  if (snap.empty) {
+    await addDoc(contactsRef, {
+      name: pushName || "",
+      whatsapp: phone,
+      status: status || "",
+      service: extraFields.service || "Limpeza",
+      type: "Empresa",
+      createdAt: serverTimestamp(),
+      lastContactAt: serverTimestamp(),
+      autoClassified: true,
+      ...extraFields,
+    });
+    return;
+  }
+
+  const existing = snap.docs[0];
+  const currentStatus = existing.data().status || "";
+  const updates = { lastContactAt: serverTimestamp(), ...extraFields };
+
+  if (status && (canAutoReclassify(currentStatus) || currentStatus === status)) {
+    updates.status = status;
+  }
+
+  await updateDoc(doc(db, "contacts", existing.id), updates);
+}
+
+/**
+ * Roda o agente de IA para uma mensagem recebida (não chamado para mensagens
+ * enviadas pela própria LCS, nem para contatos já em atendimento humano).
+ */
+async function runBotFlow({ db, phone, pushName, messageDoc }) {
+  const stateRef = doc(db, "bot_state", phone);
+  const stateSnap = await getDoc(stateRef);
+  const state = stateSnap.exists() ? stateSnap.data() : null;
+
+  // Conversa pausada (cliente escolheu "Cliente" no menu, ou um atendente
+  // assumiu manualmente) — o bot fica em silêncio.
+  if (state?.paused) return;
+
+  // PDF de currículo chegando enquanto a conversa está aguardando — tratado
+  // separado do processMessage (que só entende texto).
+  if (messageDoc.type === "document" && state?.menu === "curriculo_aguardando") {
+    await sendTextSequence(phone, [curriculoRecebidoMensagem()]);
+    await setDoc(stateRef, { menu: "main", step: 0, data: {}, paused: false, updatedAt: serverTimestamp() });
+    return;
+  }
+
+  // Fora do fluxo de currículo, o bot só reage a texto — áudio/imagem/documento
+  // continuam só salvos e visíveis na Inbox, sem disparar o menu.
+  if (messageDoc.type !== "text") return;
+
+  const result = processMessage({ text: messageDoc.text, pushName, state });
+
+  if (result.replies?.length) {
+    await sendTextSequence(phone, result.replies);
+  }
+
+  await setDoc(stateRef, {
+    menu: result.newState.menu,
+    step: result.newState.step,
+    data: result.newState.data || {},
+    paused: !!result.newState.paused,
+    updatedAt: serverTimestamp(),
+  });
+
+  if (result.statusUpdate) {
+    await upsertContactFromBot(db, phone, pushName, result.statusUpdate);
+  }
+
+  if (result.sendDocument === "apresentacao_empresa") {
+    if (EMPRESA_PRESENTATION_URL) {
+      await sendDocumentFromUrl(phone, EMPRESA_PRESENTATION_URL, "Apresentacao-LCS-Terceirizacao.pdf");
+    } else {
+      console.warn("EMPRESA_PRESENTATION_URL não configurada — apresentação não enviada.");
+    }
+  }
+
+  if (result.saveQuote) {
+    await addDoc(collection(db, "orcamentos"), {
+      phone,
+      pushName: pushName || "",
+      ...result.saveQuote,
+      createdAt: serverTimestamp(),
+    });
+    await upsertContactFromBot(db, phone, pushName, "lead", { service: result.saveQuote.servico });
+  }
+
+  if (result.saveSupplierCategory) {
+    await upsertContactFromBot(db, phone, pushName, null, {
+      tipo: "fornecedor",
+      categoriaFornecedor: result.saveSupplierCategory,
+    });
+  }
 }
 
 /**
@@ -247,8 +377,8 @@ export default async function handler(req, res) {
     const db = getDb();
     await addDoc(collection(db, "whatsapp_messages"), messageDoc);
 
-    // Classificação automática de status (lead/curriculo) só para mensagens
-    // recebidas (não para as que a própria LCS envia).
+    // Classificação automática + agente de IA só para mensagens recebidas
+    // (não para as que a própria LCS envia).
     if (!fromMe) {
       try {
         await applyAutoClassification({
@@ -263,6 +393,18 @@ export default async function handler(req, res) {
         // Erro na classificação não deve impedir o webhook de responder OK
         // (a mensagem já foi salva com sucesso).
         console.error("Erro na classificação automática:", classifyErr);
+      }
+
+      try {
+        const contact = await findContactByPhone(db, phone);
+        const currentStatus = contact?.status || "";
+        const botSkipped = BOT_SKIP_STATUSES.includes(currentStatus);
+
+        if (!botSkipped) {
+          await runBotFlow({ db, phone, pushName, messageDoc });
+        }
+      } catch (botErr) {
+        console.error("Erro no agente de IA do WhatsApp:", botErr);
       }
     }
 
