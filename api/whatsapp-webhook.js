@@ -10,9 +10,15 @@
 // de mídia (especialmente PDFs de currículo) costumam passar disso facilmente.
 //
 // NOVO: depois de salvar e classificar a mensagem, o webhook também roda o
-// agente de atendimento automático (api/lib/botFlow.js) — que conduz o menu
-// principal (Cliente / Funcionário / Orçamento / Currículo / Vendas) e envia
-// as respostas via Evolution API (api/lib/sendWhatsApp.js).
+// agente de atendimento automático (menu Cliente / Funcionário / Orçamento /
+// Currículo / Vendas) e envia as respostas via Evolution API.
+//
+// IMPORTANTE: a lógica do agente (que antes estava em api/lib/botFlow.js e
+// api/lib/sendWhatsApp.js) foi trazida pra DENTRO deste arquivo de propósito.
+// O plano Hobby da Vercel limita o deployment a 12 Serverless Functions, e
+// cada arquivo dentro de api/ (incluindo api/lib/) conta como uma function —
+// criar arquivos novos ali estourava esse limite. Função auxiliar nova =
+// colocar aqui dentro, não criar arquivo novo em api/.
 
 import { initializeApp, getApps } from "firebase/app";
 import {
@@ -30,8 +36,6 @@ import {
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
 import { detectStatusFromMessage, canAutoReclassify } from "./lib/classifyMessage.js";
-import { processMessage, curriculoRecebidoMensagem } from "./lib/botFlow.js";
-import { sendTextSequence, sendDocumentFromUrl } from "./lib/sendWhatsApp.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
@@ -49,8 +53,7 @@ const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "lcs_crm";
 const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || "251EAE7F1D35-423F-BD4A-5E79555F1521";
 
 // URL pública (Vercel Blob) do PDF de apresentação da empresa, enviado
-// automaticamente ao final do fluxo de orçamento. Configurar depois de subir
-// o arquivo (ver README, seção "Agente de IA no WhatsApp").
+// automaticamente ao final do fluxo de orçamento.
 const EMPRESA_PRESENTATION_URL = process.env.EMPRESA_PRESENTATION_URL || "";
 
 // Status que, se já estiverem no contato, fazem o agente de IA ficar
@@ -63,12 +66,370 @@ function getDb() {
   return getFirestore(app);
 }
 
-/**
- * Aplica a classificação automática de status a partir do conteúdo de uma
- * mensagem recebida. Cria o contato se ele ainda não existir, ou atualiza o
- * status de um contato existente — respeitando os status protegidos
- * (contrato, cliente, funcionario), que nunca são sobrescritos automaticamente.
- */
+// ============================================================================
+// Agente de IA — motor de menus (antes em api/lib/botFlow.js)
+// ============================================================================
+
+function normalize(text) {
+  return (text || "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function isYes(text) {
+  const t = normalize(text);
+  return t === "sim" || t === "s" || t.startsWith("sim") || ["claro", "pode", "quero", "isso"].includes(t);
+}
+
+function isNo(text) {
+  const t = normalize(text);
+  return t === "nao" || t === "n" || t.startsWith("nao");
+}
+
+function isMenuCommand(text) {
+  const t = normalize(text);
+  return ["menu", "voltar", "inicio", "0"].includes(t);
+}
+
+function greetingWord() {
+  const utcHour = new Date().getUTCHours();
+  const hour = (utcHour - 3 + 24) % 24;
+  if (hour >= 5 && hour < 12) return "Bom dia";
+  if (hour >= 12 && hour < 18) return "Boa tarde";
+  return "Boa noite";
+}
+
+const MAIN_MENU_OPTIONS_TEXT =
+  "1 - Já sou Cliente\n" +
+  "2 - Sou Funcionário\n" +
+  "3 - Quero um Orçamento\n" +
+  "4 - Enviar Currículo\n" +
+  "5 - Quero vender para a empresa\n\n" +
+  "Digite o número da opção desejada.";
+
+function mainMenuMessage(pushName) {
+  const nome = pushName ? `, ${pushName}` : "";
+  return (
+    `${greetingWord()}${nome}! 👋 Bem-vindo à *LCS Terceirização*.\n\n` +
+    `Como posso te ajudar hoje?\n\n${MAIN_MENU_OPTIONS_TEXT}`
+  );
+}
+
+const FUNCIONARIO_MENU_TEXT =
+  "Área do Colaborador 👷\n\nO que você precisa?\n\n" +
+  "1 - Escala de Trabalho\n" +
+  "2 - Holerite / Pagamento\n" +
+  "3 - Benefícios\n" +
+  "4 - Férias ou Folga\n" +
+  "5 - Reportar Urgência\n" +
+  "0 - Voltar ao Menu Principal";
+
+const FUNCIONARIO_RESPOSTAS = {
+  "1": "📅 *Escala de Trabalho*\n\nPor favor, informe seu *nome completo* e *matrícula*. Nosso RH retorna em até 2 horas úteis.\n\nDigite *menu* para voltar.",
+  "2": "💵 *Holerite / Pagamento*\n\nPagamentos são feitos todo dia 5. Informe sua matrícula e o mês de referência que você precisa consultar.\n\nDigite *menu* para voltar.",
+  "3": "🏥 *Benefícios*\n\nInforme qual benefício você quer consultar (vale-transporte, plano de saúde, etc) e sua matrícula.\n\nDigite *menu* para voltar.",
+  "4": "📋 *Férias ou Folga*\n\nInforme seu nome completo, matrícula e o período desejado. O RH vai analisar e retornar.\n\nDigite *menu* para voltar.",
+  "5": "🆘 *Urgência*\n\nDescreva rapidamente o que está acontecendo. Se for uma emergência grave, ligue diretamente para o setor operacional.\n\nDigite *menu* para voltar.",
+};
+
+const ORCAMENTO_MENU_TEXT =
+  "Vamos preparar seu orçamento! 💰\n\nQual serviço você precisa?\n\n" +
+  "1 - Limpeza\n" +
+  "2 - Portaria\n" +
+  "3 - Zeladoria\n" +
+  "0 - Voltar ao Menu Principal";
+
+const SERVICOS_ORCAMENTO = { "1": "Limpeza", "2": "Portaria", "3": "Zeladoria" };
+
+const TIPO_PORTARIA_PERGUNTA =
+  "Qual tipo de portaria você precisa?\n\n1 - Portaria 24 horas\n2 - Portaria 12 horas\n3 - Portaria Virtual";
+const TIPOS_PORTARIA = { "1": "Portaria 24 horas", "2": "Portaria 12 horas", "3": "Portaria Virtual" };
+
+const CARGA_HORARIA_PERGUNTA = "Qual a carga horária desejada? (ex: 6h, 8h, 12x36, segunda a sábado, etc)";
+const ENDERECO_PERGUNTA = "Qual o endereço onde o serviço será prestado?";
+const VISITA_TECNICA_PERGUNTA = "Gostaria de agendar uma visita técnica antes do orçamento? (Sim/Não)";
+const INSALUBRIDADE_PERGUNTA = "O serviço inclui limpeza de banheiros ou retirada de lixo? (Sim/Não)";
+
+const VENDAS_MENU_TEXT =
+  "Parceiros e Fornecedores 🤝\n\nQual categoria você representa?\n\n" +
+  "1 - Produtos de Limpeza e EPI\n" +
+  "2 - Uniformes e Fardamentos\n" +
+  "3 - Tecnologia e Sistemas\n" +
+  "4 - Outros Produtos / Serviços\n" +
+  "0 - Voltar ao Menu Principal";
+
+const VENDAS_CATEGORIAS = {
+  "1": "Produtos de Limpeza e EPI",
+  "2": "Uniformes e Fardamentos",
+  "3": "Tecnologia e Sistemas",
+  "4": "Outros Produtos / Serviços",
+};
+
+function emptyState() {
+  return { menu: "main", step: 0, data: {} };
+}
+
+function processMessage({ text, pushName, state }) {
+  const incoming = (text || "").trim();
+  const current = state && state.menu ? state : emptyState();
+
+  if (isMenuCommand(incoming) && current.menu !== "main") {
+    return { replies: [mainMenuMessage(pushName)], newState: emptyState() };
+  }
+
+  switch (current.menu) {
+    case "funcionario":
+      return handleFuncionarioMenu(incoming);
+    case "orcamento":
+      return handleOrcamentoMenu(incoming);
+    case "orcamento_fluxo":
+      return handleOrcamentoFluxo(incoming, current);
+    case "curriculo_aguardando":
+      return handleCurriculoAguardando(incoming, current);
+    case "vendas":
+      return handleVendasMenu(incoming);
+    case "main":
+    default:
+      return handleMainMenu(incoming, pushName);
+  }
+}
+
+function handleMainMenu(incoming, pushName) {
+  if (!["1", "2", "3", "4", "5"].includes(incoming)) {
+    return { replies: [mainMenuMessage(pushName)], newState: emptyState() };
+  }
+
+  if (incoming === "1") {
+    return {
+      replies: [
+        "Que bom te ter como cliente da LCS! 😊 Vou conectar você direto com nossa equipe de atendimento, só um instante.",
+      ],
+      newState: { ...emptyState(), paused: true },
+      statusUpdate: "cliente",
+    };
+  }
+
+  if (incoming === "2") {
+    return {
+      replies: [FUNCIONARIO_MENU_TEXT],
+      newState: { menu: "funcionario", step: 0, data: {} },
+      statusUpdate: "funcionario",
+    };
+  }
+
+  if (incoming === "3") {
+    return { replies: [ORCAMENTO_MENU_TEXT], newState: { menu: "orcamento", step: 0, data: {} } };
+  }
+
+  if (incoming === "4") {
+    return {
+      replies: [
+        "Que ótimo seu interesse em fazer parte da equipe LCS! 📋\n\n" +
+          "Me conta seu *nome completo* e a *vaga ou área* de interesse. Em seguida, envie seu currículo em PDF aqui mesmo no chat 📎",
+      ],
+      newState: { menu: "curriculo_aguardando", step: 0, data: {} },
+      statusUpdate: "curriculo",
+    };
+  }
+
+  return { replies: [VENDAS_MENU_TEXT], newState: { menu: "vendas", step: 0, data: {} } };
+}
+
+function handleFuncionarioMenu(incoming) {
+  if (incoming === "0") {
+    return { replies: [mainMenuMessage()], newState: emptyState() };
+  }
+  const resposta = FUNCIONARIO_RESPOSTAS[incoming];
+  if (!resposta) {
+    return { replies: ["Não entendi 🤔\n\n" + FUNCIONARIO_MENU_TEXT], newState: { menu: "funcionario", step: 0, data: {} } };
+  }
+  return { replies: [resposta], newState: { menu: "funcionario", step: 0, data: {} } };
+}
+
+function handleOrcamentoMenu(incoming) {
+  if (incoming === "0") {
+    return { replies: [mainMenuMessage()], newState: emptyState() };
+  }
+  const servico = SERVICOS_ORCAMENTO[incoming];
+  if (!servico) {
+    return { replies: ["Não entendi 🤔\n\n" + ORCAMENTO_MENU_TEXT], newState: { menu: "orcamento", step: 0, data: {} } };
+  }
+
+  if (servico === "Portaria") {
+    return { replies: [TIPO_PORTARIA_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 1, data: { servico } } };
+  }
+
+  return { replies: [CARGA_HORARIA_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 2, data: { servico } } };
+}
+
+function handleOrcamentoFluxo(incoming, state) {
+  const data = { ...state.data };
+  const servico = data.servico;
+
+  if (state.step === 1) {
+    const tipo = TIPOS_PORTARIA[incoming];
+    if (!tipo) {
+      return { replies: ["Não entendi 🤔\n\n" + TIPO_PORTARIA_PERGUNTA], newState: state };
+    }
+    data.tipoPortaria = tipo;
+    return { replies: [CARGA_HORARIA_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 2, data } };
+  }
+
+  if (state.step === 2) {
+    data.cargaHoraria = incoming;
+    return { replies: [ENDERECO_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 3, data } };
+  }
+
+  if (state.step === 3) {
+    data.endereco = incoming;
+    return { replies: [VISITA_TECNICA_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 4, data } };
+  }
+
+  if (state.step === 4) {
+    if (!isYes(incoming) && !isNo(incoming)) {
+      return { replies: ["Não entendi 🤔\n\n" + VISITA_TECNICA_PERGUNTA], newState: state };
+    }
+    data.visitaTecnica = isYes(incoming);
+
+    if (servico === "Portaria") {
+      return finalizarOrcamento(data);
+    }
+    return { replies: [INSALUBRIDADE_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 5, data } };
+  }
+
+  if (state.step === 5) {
+    if (!isYes(incoming) && !isNo(incoming)) {
+      return { replies: ["Não entendi 🤔\n\n" + INSALUBRIDADE_PERGUNTA], newState: state };
+    }
+    data.banheirosOuLixo = isYes(incoming);
+    data.insalubridade = data.banheirosOuLixo ? "40%" : "20%";
+    return finalizarOrcamento(data);
+  }
+
+  return { replies: [mainMenuMessage()], newState: emptyState() };
+}
+
+function finalizarOrcamento(data) {
+  return {
+    replies: [
+      "Show, anotei tudo! ✅ Já vou passar essas informações para nossa equipe elaborar seu orçamento, " +
+        "e em breve alguém vai te chamar por aqui.\n\nEnquanto isso, segue nossa apresentação:",
+    ],
+    newState: emptyState(),
+    statusUpdate: "lead",
+    sendDocument: "apresentacao_empresa",
+    saveQuote: data,
+  };
+}
+
+function handleCurriculoAguardando(incoming, state) {
+  return {
+    replies: [
+      "Anotado! Agora é só enviar seu currículo em PDF por aqui mesmo no chat 📎. " +
+        "Assim que recebermos, nossa equipe de RH vai dar retorno.",
+    ],
+    newState: { menu: "curriculo_aguardando", step: 0, data: { ...state.data, infoTexto: incoming } },
+  };
+}
+
+function curriculoRecebidoMensagem() {
+  return (
+    "Recebemos seu currículo! 🙌 Nossa equipe de RH vai analisar e entrar em contato caso haja uma " +
+    "vaga compatível com seu perfil. Obrigado pelo interesse em fazer parte da LCS!"
+  );
+}
+
+function handleVendasMenu(incoming) {
+  if (incoming === "0") {
+    return { replies: [mainMenuMessage()], newState: emptyState() };
+  }
+  const categoria = VENDAS_CATEGORIAS[incoming];
+  if (!categoria) {
+    return { replies: ["Não entendi 🤔\n\n" + VENDAS_MENU_TEXT], newState: { menu: "vendas", step: 0, data: {} } };
+  }
+  return {
+    replies: [
+      `Anotado! Categoria: *${categoria}*.\n\n` +
+        "Por favor, envie uma breve apresentação da sua empresa/produto e um contato comercial. " +
+        "Nosso setor de compras vai analisar e retornar caso haja interesse. Obrigado! 🤝",
+    ],
+    newState: emptyState(),
+    saveSupplierCategory: categoria,
+  };
+}
+
+// ============================================================================
+// Envio via Evolution API (antes em api/lib/sendWhatsApp.js)
+// ============================================================================
+
+function normalizePhoneForSend(raw) {
+  if (!raw) return "";
+  let digits = raw.toString().replace(/\D/g, "");
+  if (digits.startsWith("0")) digits = digits.slice(1);
+  if (!digits.startsWith("55")) digits = "55" + digits;
+  return digits;
+}
+
+async function sendText(toPhone, text) {
+  const number = normalizePhoneForSend(toPhone);
+  if (!number || !text) return { ok: false, error: "Número ou texto vazio" };
+
+  try {
+    const res = await fetch(`${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+      body: JSON.stringify({ number, text }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { ok: false, error: data?.message || "Erro ao enviar mensagem" };
+    return { ok: true, data };
+  } catch (err) {
+    console.error("Erro ao enviar texto via Evolution API:", err);
+    return { ok: false, error: err.message };
+  }
+}
+
+async function sendTextSequence(toPhone, texts) {
+  const results = [];
+  for (const text of texts) {
+    results.push(await sendText(toPhone, text));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+  return results;
+}
+
+async function sendDocumentFromUrl(toPhone, url, fileName, caption) {
+  const number = normalizePhoneForSend(toPhone);
+  if (!number || !url) return { ok: false, error: "Número ou URL vazio" };
+
+  try {
+    const res = await fetch(`${EVOLUTION_BASE_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+      body: JSON.stringify({
+        number,
+        mediatype: "document",
+        media: url,
+        fileName: fileName || "documento.pdf",
+        caption: caption || "",
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { ok: false, error: data?.message || "Erro ao enviar documento" };
+    return { ok: true, data };
+  } catch (err) {
+    console.error("Erro ao enviar documento via Evolution API:", err);
+    return { ok: false, error: err.message };
+  }
+}
+
+// ============================================================================
+// Classificação automática por palavra-chave (já existia)
+// ============================================================================
+
 async function applyAutoClassification({ db, phone, pushName, text, type, fileName }) {
   const newStatus = detectStatusFromMessage({ text, type, fileName });
   if (!newStatus) return;
@@ -103,9 +464,6 @@ async function applyAutoClassification({ db, phone, pushName, text, type, fileNa
   });
 }
 
-/**
- * Busca o contato do CRM pelo telefone. Devolve { id, ...data } ou null.
- */
 async function findContactByPhone(db, phone) {
   const contactsRef = collection(db, "contacts");
   const q = query(contactsRef, where("whatsapp", "==", phone));
@@ -114,11 +472,6 @@ async function findContactByPhone(db, phone) {
   return { id: snap.docs[0].id, ...snap.docs[0].data() };
 }
 
-/**
- * Cria ou atualiza o contato a partir de uma decisão do agente de IA (ex:
- * pessoa escolheu "Sou Cliente" ou "Sou Funcionário" no menu). Respeita os
- * mesmos status protegidos da classificação por palavra-chave.
- */
 async function upsertContactFromBot(db, phone, pushName, status, extraFields = {}) {
   const contactsRef = collection(db, "contacts");
   const q = query(contactsRef, where("whatsapp", "==", phone));
@@ -150,29 +503,19 @@ async function upsertContactFromBot(db, phone, pushName, status, extraFields = {
   await updateDoc(doc(db, "contacts", existing.id), updates);
 }
 
-/**
- * Roda o agente de IA para uma mensagem recebida (não chamado para mensagens
- * enviadas pela própria LCS, nem para contatos já em atendimento humano).
- */
 async function runBotFlow({ db, phone, pushName, messageDoc }) {
   const stateRef = doc(db, "bot_state", phone);
   const stateSnap = await getDoc(stateRef);
   const state = stateSnap.exists() ? stateSnap.data() : null;
 
-  // Conversa pausada (cliente escolheu "Cliente" no menu, ou um atendente
-  // assumiu manualmente) — o bot fica em silêncio.
   if (state?.paused) return;
 
-  // PDF de currículo chegando enquanto a conversa está aguardando — tratado
-  // separado do processMessage (que só entende texto).
   if (messageDoc.type === "document" && state?.menu === "curriculo_aguardando") {
     await sendTextSequence(phone, [curriculoRecebidoMensagem()]);
     await setDoc(stateRef, { menu: "main", step: 0, data: {}, paused: false, updatedAt: serverTimestamp() });
     return;
   }
 
-  // Fora do fluxo de currículo, o bot só reage a texto — áudio/imagem/documento
-  // continuam só salvos e visíveis na Inbox, sem disparar o menu.
   if (messageDoc.type !== "text") return;
 
   const result = processMessage({ text: messageDoc.text, pushName, state });
@@ -219,10 +562,10 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
   }
 }
 
-/**
- * Busca a mídia de uma mensagem (áudio, imagem, documento, etc.) já decodificada
- * em base64, direto da Evolution API, usando o ID da mensagem original.
- */
+// ============================================================================
+// Mídia (já existia)
+// ============================================================================
+
 async function fetchMediaBase64(messageId) {
   try {
     const res = await fetch(
@@ -248,11 +591,6 @@ async function fetchMediaBase64(messageId) {
   }
 }
 
-/**
- * Envia o conteúdo de mídia (base64) para o Vercel Blob e retorna a URL pública.
- * Usado para áudio, imagem e documentos — nunca salvamos base64 grande direto
- * no Firestore.
- */
 async function uploadMediaToBlob(base64, mimetype, extensionHint) {
   try {
     const buffer = Buffer.from(base64, "base64");
@@ -279,7 +617,6 @@ export default async function handler(req, res) {
     const body = req.body;
     const event = body?.event;
 
-    // A Evolution API envia diferentes eventos; só nos interessa MESSAGES_UPSERT
     if (event !== "messages.upsert" && event !== "MESSAGES_UPSERT") {
       return res.status(200).json({ ok: true, skipped: true });
     }
@@ -377,8 +714,6 @@ export default async function handler(req, res) {
     const db = getDb();
     await addDoc(collection(db, "whatsapp_messages"), messageDoc);
 
-    // Classificação automática + agente de IA só para mensagens recebidas
-    // (não para as que a própria LCS envia).
     if (!fromMe) {
       try {
         await applyAutoClassification({
@@ -390,8 +725,6 @@ export default async function handler(req, res) {
           fileName: messageDoc.fileName,
         });
       } catch (classifyErr) {
-        // Erro na classificação não deve impedir o webhook de responder OK
-        // (a mensagem já foi salva com sucesso).
         console.error("Erro na classificação automática:", classifyErr);
       }
 
