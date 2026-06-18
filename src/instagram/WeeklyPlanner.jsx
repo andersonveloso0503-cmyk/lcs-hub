@@ -1,12 +1,25 @@
 import { useState } from "react";
-import { Sparkles, Calendar, Send, RefreshCw, Image as ImageIcon } from "lucide-react";
-import { generateWeek, uploadImage, scheduleToBuffer } from "./api";
+import { Sparkles, Calendar, Send, RefreshCw, Image as ImageIcon, Layers, Bot } from "lucide-react";
+import { generateWeek, generateCreativeAI, uploadImage, scheduleToBuffer } from "./api";
 import { attachScheduleDates, formatScheduledDate } from "./weekSchedule";
 import { adaptToStoriesFormat } from "./photoStyle";
 
+// Serviços disponíveis pra geração de criativo via IA — mesma lista usada
+// no generate-creative-ai.js (mapeados por cena lá dentro).
+const SERVICE_TO_AI_KEY = {
+  "Limpeza e Conservação": "Limpeza",
+  "Portaria e Recepção": "Portaria",
+  "Zeladoria": "Facilities",
+  "Condomínios e Síndicos": "Condomínios",
+  "Empresas / Escritórios": "Empresas",
+  "Apresentação Geral LCS": "Limpeza",
+};
+
 export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
-  const [posts, setPosts] = useState([]); // { day, service, caption, suggestedTime, scheduledAt, photoId }
+  const [posts, setPosts] = useState([]);
   const [generating, setGenerating] = useState(false);
+  const [imageSource, setImageSource] = useState("temas"); // "temas" | "ia"
+  const [aiProgress, setAiProgress] = useState(null); // null | { current, total }
   const [error, setError] = useState("");
   const [sendingAll, setSendingAll] = useState(false);
   const [sentCount, setSentCount] = useState(0);
@@ -19,16 +32,19 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
       (p) => p.service?.toLowerCase().includes(serviceWord) && !usedIds.has(p.id)
     );
     if (match) return match;
-    // fallback: pega a próxima foto não usada ainda, ciclicamente
     const unused = themeBankPhotos.find((p) => !usedIds.has(p.id));
     return unused || themeBankPhotos[0];
   }
 
   async function handleGenerateWeek() {
+    if (imageSource === "temas" && themeBankPhotos.length === 0) return;
+
     setGenerating(true);
     setError("");
     setDone(false);
+    setAiProgress(null);
 
+    // 1. Gera as 7 legendas via Claude
     const result = await generateWeek();
     if (!result.ok) {
       setError(result.error);
@@ -37,25 +53,53 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
     }
 
     const withDates = attachScheduleDates(result.posts);
-    const usedIds = new Set();
-    const withPhotos = await Promise.all(
-      withDates.map(async (p) => {
-        const photo = pickPhotoForService(p.service, usedIds);
-        if (photo) usedIds.add(photo.id);
 
+    // 2. Para cada post, pega ou gera a imagem conforme o modo escolhido
+    const postsBuilt = [];
+    for (let i = 0; i < withDates.length; i++) {
+      const p = withDates[i];
+
+      if (imageSource === "ia") {
+        setAiProgress({ current: i + 1, total: withDates.length });
+        const aiKey = SERVICE_TO_AI_KEY[p.service] || "Limpeza";
+        const headline = p.service.split(" ")[0]; // ex: "Limpeza", "Portaria"
+        const creative = await generateCreativeAI({ service: aiKey, headline, format: p.format });
+        if (!creative.ok) {
+          setError(`Erro ao gerar criativo de ${p.day}: ${creative.error}`);
+          setGenerating(false);
+          setAiProgress(null);
+          return;
+        }
+        postsBuilt.push({
+          ...p,
+          photoId: null,
+          photoUrl: creative.imageBase64, // base64 — vai precisar de upload antes de agendar
+          isBase64: true,
+          isAdapted: false,
+        });
+      } else {
+        // Banco de Temas
+        const usedIds = new Set(postsBuilt.map((x) => x.photoId).filter(Boolean));
+        const photo = pickPhotoForService(p.service, usedIds);
         let photoUrl = photo?.imageUrl || null;
         let isAdapted = false;
         if (photoUrl && p.format === "stories") {
           photoUrl = await adaptToStoriesFormat(photoUrl, photo?.theme || "azul");
-          isAdapted = true; // resultado é base64 local, precisa de upload antes do Buffer
+          isAdapted = true;
         }
+        postsBuilt.push({
+          ...p,
+          photoId: photo?.id || null,
+          photoUrl,
+          isBase64: isAdapted, // stories adaptados viram base64 local
+          isAdapted,
+        });
+      }
+    }
 
-        return { ...p, photoId: photo?.id || null, photoUrl, isAdapted };
-      })
-    );
-
-    setPosts(withPhotos);
+    setPosts(postsBuilt);
     setGenerating(false);
+    setAiProgress(null);
   }
 
   function updatePost(index, field, value) {
@@ -65,14 +109,14 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
   }
 
   function changePhoto(index) {
+    if (imageSource === "ia") return; // não faz sentido trocar foto gerada por IA aqui
     const post = posts[index];
-    const candidates = themeBankPhotos.filter((p) => p.id !== post.photoId);
-    if (candidates.length === 0) return;
     const currentIdx = themeBankPhotos.findIndex((p) => p.id === post.photoId);
     const nextIdx = (currentIdx + 1) % themeBankPhotos.length;
-    const next = themeBankPhotos[nextIdx] === post.photoId ? candidates[0] : themeBankPhotos[nextIdx];
+    const next = themeBankPhotos[nextIdx];
     updatePost(index, "photoId", next.id);
     updatePost(index, "photoUrl", next.imageUrl);
+    updatePost(index, "isBase64", false);
     updatePost(index, "isAdapted", false);
   }
 
@@ -85,11 +129,10 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
     for (const post of posts) {
       if (!post.photoUrl) continue;
 
-      // Se a foto foi adaptada para o formato stories, ela é um base64 novo
-      // gerado localmente e precisa de upload. Se não foi adaptada, já é uma
-      // URL pública do Blob (vinda do Banco de Temas) e pode ser usada direto.
+      // Se a imagem é base64 (criativo IA ou stories adaptado), precisa subir
+      // pro Vercel Blob antes de enviar ao Buffer (que exige URL pública).
       let finalImageUrl = post.photoUrl;
-      if (post.isAdapted) {
+      if (post.isBase64) {
         const upload = await uploadImage(post.photoUrl, `week-post-${Date.now()}.png`);
         if (!upload.ok) {
           setError(`Erro no upload da foto de ${post.day}: ${upload.error}`);
@@ -115,6 +158,7 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
           status: "agendado",
           scheduledAt: post.scheduledAt,
           bufferPostIds,
+          imageSource,
         });
         setSentCount((c) => c + 1);
 
@@ -127,43 +171,73 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
       }
     }
 
-    if (warnings.length > 0) {
-      setError(warnings.join(" · "));
-    }
-
+    if (warnings.length > 0) setError(warnings.join(" · "));
     setSendingAll(false);
     setDone(true);
   }
+
+  const canGenerate =
+    !generating &&
+    (imageSource === "ia" || themeBankPhotos.length > 0);
 
   return (
     <div>
       <div className="card">
         <div className="card-title">📅 Planejamento Semanal — 7 posts de uma vez</div>
         <p className="muted" style={{ marginBottom: 16 }}>
-          A IA gera 7 legendas variadas (uma por dia, serviços diferentes), escolhe fotos do
-          Banco de Temas e sugere horários. Revise, ajuste o que quiser, e agende tudo no Buffer
+          A IA gera 7 legendas variadas (uma por dia, alternando Limpeza, Portaria e Zeladoria),
+          com criativo e horário sugerido. Revise, ajuste o que quiser, e agende tudo no Buffer
           com um clique.
         </p>
 
-        {themeBankPhotos.length === 0 && (
+        {/* Seletor de fonte de imagem */}
+        <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+          <button
+            className={"btn " + (imageSource === "temas" ? "btn-ig" : "btn-secondary")}
+            onClick={() => setImageSource("temas")}
+            style={{ flex: 1 }}
+          >
+            <Layers size={14} /> Banco de Temas
+          </button>
+          <button
+            className={"btn " + (imageSource === "ia" ? "btn-ig" : "btn-secondary")}
+            onClick={() => setImageSource("ia")}
+            style={{ flex: 1 }}
+          >
+            <Bot size={14} /> IA gera o criativo
+          </button>
+        </div>
+
+        {imageSource === "temas" && themeBankPhotos.length === 0 && (
           <div className="chat-error" style={{ marginBottom: 16 }}>
             Você ainda não tem fotos no Banco de Temas. Vá no Editor de Fotos e processe algumas
-            fotos antes de gerar a semana.
+            fotos antes de gerar a semana, ou escolha "IA gera o criativo" acima.
+          </div>
+        )}
+
+        {imageSource === "ia" && (
+          <div className="muted" style={{ marginBottom: 16, fontSize: 12 }}>
+            💡 A IA gera 7 imagens (~$0.03–0.05 cada). Revise os criativos antes de agendar —
+            a IA pode errar textos dentro da imagem.
           </div>
         )}
 
         <button
           className="btn btn-ig"
           onClick={handleGenerateWeek}
-          disabled={generating || themeBankPhotos.length === 0}
+          disabled={!canGenerate}
         >
           {generating ? (
             <>
-              <RefreshCw size={15} className="spin" /> Gerando a semana...
+              <RefreshCw size={15} className="spin" />
+              {aiProgress
+                ? `Gerando criativo ${aiProgress.current}/${aiProgress.total}...`
+                : "Gerando legendas..."}
             </>
           ) : (
             <>
-              <Sparkles size={15} /> {posts.length > 0 ? "Gerar nova semana" : "Gerar semana com IA"}
+              <Sparkles size={15} />
+              {posts.length > 0 ? "Gerar nova semana" : "Gerar semana com IA"}
             </>
           )}
         </button>
@@ -193,7 +267,7 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
                     <ImageIcon size={20} />
                   </div>
                 )}
-                {themeBankPhotos.length > 1 && (
+                {imageSource === "temas" && themeBankPhotos.length > 1 && (
                   <button
                     className="week-card-change-photo"
                     onClick={() => changePhoto(i)}
