@@ -7,6 +7,18 @@ Plataforma única que unifica os três projetos da LCS Terceirização:
 
 ## Status: Fase 5 em andamento 🟡
 
+### Melhoria — Classificação automática de contatos por palavra-chave
+O webhook do WhatsApp (`api/whatsapp-webhook.js`) agora classifica contatos automaticamente
+com base no conteúdo de mensagens recebidas, usando `api/lib/classifyMessage.js`:
+- Menções a vaga, currículo, emprego, RH, etc (ou um documento PDF/imagem com nome sugestivo de
+  currículo) → status **Currículo**.
+- Menções a orçamento, preço, valor, cotação, etc → status **Lead**.
+
+Se o número ainda não tiver um contato no CRM, um novo é criado automaticamente já com o status
+certo. Se já existir, o status é atualizado — **exceto** quando o contato já está em **Contrato**
+ou **Funcionário** (relações já consolidadas, nunca sobrescritas automaticamente). Mensagens
+enviadas pela própria LCS (`fromMe: true`) não disparam classificação.
+
 ### Fase 5 — Google Ads (estrutura real, métricas pendentes)
 Módulo Google Ads reconstruído (`src/pages/GoogleAdsModule.jsx`), substituindo o placeholder
 anterior. Mostra dados reais de estrutura das campanhas (32 campanhas, conta `3371725537`):
@@ -175,7 +187,9 @@ Push para o GitHub → a Vercel builda automaticamente. Lembre-se das variáveis
 
 ```
 api/
-├── whatsapp-webhook.js     # recebe mensagens da Evolution API (Fase 2)
+├── whatsapp-webhook.js     # recebe mensagens da Evolution API (Fase 2) + classificação automática
+├── lib/
+│   └── classifyMessage.js  # regras de palavra-chave para classificação automática de contatos
 ├── generate-caption.js     # gera legenda de Instagram via Claude API
 ├── upload-image.js         # upload de imagem para Vercel Blob
 ├── buffer-schedule.js      # agenda/publica post no Instagram via Buffer

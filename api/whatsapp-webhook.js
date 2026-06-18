@@ -10,8 +10,19 @@
 // de mídia (especialmente PDFs de currículo) costumam passar disso facilmente.
 
 import { initializeApp, getApps } from "firebase/app";
-import { getFirestore, collection, addDoc, serverTimestamp } from "firebase/firestore";
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  serverTimestamp,
+  query,
+  where,
+  getDocs,
+  updateDoc,
+  doc,
+} from "firebase/firestore";
 import { put } from "@vercel/blob";
+import { detectStatusFromMessage, canAutoReclassify } from "./lib/classifyMessage.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
@@ -31,6 +42,51 @@ const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || "251EAE7F1D35-423F-BD4A-5
 function getDb() {
   const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
   return getFirestore(app);
+}
+
+/**
+ * Aplica a classificação automática de status a partir do conteúdo de uma
+ * mensagem recebida. Cria o contato se ele ainda não existir, ou atualiza o
+ * status de um contato existente — respeitando os status protegidos
+ * (contrato, funcionario), que nunca são sobrescritos automaticamente.
+ */
+async function applyAutoClassification({ db, phone, pushName, text, type, fileName }) {
+  const newStatus = detectStatusFromMessage({ text, type, fileName });
+  if (!newStatus) return;
+
+  const contactsRef = collection(db, "contacts");
+  const q = query(contactsRef, where("whatsapp", "==", phone));
+  const snap = await getDocs(q);
+
+  if (snap.empty) {
+    // Nenhum contato ainda para esse número — cria um novo já classificado.
+    await addDoc(contactsRef, {
+      name: pushName || "",
+      whatsapp: phone,
+      status: newStatus,
+      service: "Limpeza",
+      type: "Empresa",
+      createdAt: serverTimestamp(),
+      lastContactAt: serverTimestamp(),
+      autoClassified: true,
+    });
+    return;
+  }
+
+  const existing = snap.docs[0];
+  const currentStatus = existing.data().status || "";
+
+  if (!canAutoReclassify(currentStatus)) {
+    // Status protegido (contrato/funcionario) — não sobrescreve.
+    return;
+  }
+
+  if (currentStatus === newStatus) return;
+
+  await updateDoc(doc(db, "contacts", existing.id), {
+    status: newStatus,
+    lastContactAt: serverTimestamp(),
+  });
 }
 
 /**
@@ -190,6 +246,25 @@ export default async function handler(req, res) {
 
     const db = getDb();
     await addDoc(collection(db, "whatsapp_messages"), messageDoc);
+
+    // Classificação automática de status (lead/curriculo) só para mensagens
+    // recebidas (não para as que a própria LCS envia).
+    if (!fromMe) {
+      try {
+        await applyAutoClassification({
+          db,
+          phone,
+          pushName,
+          text: messageDoc.text,
+          type: messageDoc.type,
+          fileName: messageDoc.fileName,
+        });
+      } catch (classifyErr) {
+        // Erro na classificação não deve impedir o webhook de responder OK
+        // (a mensagem já foi salva com sucesso).
+        console.error("Erro na classificação automática:", classifyErr);
+      }
+    }
 
     return res.status(200).json({ ok: true });
   } catch (err) {
