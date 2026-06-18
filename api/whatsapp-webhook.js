@@ -56,6 +56,31 @@ const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || "251EAE7F1D35-423F-BD4A-5
 // automaticamente ao final do fluxo de orçamento.
 const EMPRESA_PRESENTATION_URL = process.env.EMPRESA_PRESENTATION_URL || "";
 
+// WhatsApp do especialista que recebe os dados de cada orçamento finalizado.
+const ESPECIALISTA_WHATSAPP = process.env.ESPECIALISTA_WHATSAPP || "5551985025102";
+
+/**
+ * Monta a mensagem com todos os dados coletados no fluxo de orçamento, pra
+ * mandar pro especialista assim que o cliente termina de responder.
+ */
+function buildEspecialistaMessage({ phone, pushName, data }) {
+  const linhas = [
+    "📋 *Novo pedido de orçamento pelo WhatsApp*",
+    "",
+    `Cliente: ${pushName || "(sem nome)"}`,
+    `WhatsApp: ${phone}`,
+    `Serviço: ${data.servico}`,
+  ];
+
+  if (data.tipoPortaria) linhas.push(`Tipo de portaria: ${data.tipoPortaria}`);
+  linhas.push(`Carga horária desejada: ${data.cargaHoraria}`);
+  linhas.push(`Endereço: ${data.endereco}`);
+  linhas.push(`Visita técnica: ${data.visitaTecnica ? "Sim" : "Não"}`);
+  if (data.insalubridade) linhas.push(`Insalubridade: ${data.insalubridade}`);
+
+  return linhas.join("\n");
+}
+
 // Status que, se já estiverem no contato, fazem o agente de IA ficar
 // completamente em silêncio (o atendimento já é humano) — diferente de
 // "funcionario", que continua usando o submenu de autoatendimento.
@@ -339,8 +364,7 @@ function handleOrcamentoFluxo(incoming, state) {
 function finalizarOrcamento(data) {
   return {
     replies: [
-      "Show, anotei tudo! ✅ Já vou passar essas informações para nossa equipe elaborar seu orçamento, " +
-        "e em breve alguém vai te chamar por aqui.\n\nEnquanto isso, segue nossa apresentação:",
+      "Show, anotei tudo! ✅ Já estamos encaminhando para nossos especialistas — em breve eles entrarão em contato com você.\n\nEnquanto isso, segue nossa apresentação:",
     ],
     newState: emptyState(),
     statusUpdate: "lead",
@@ -597,6 +621,13 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
       createdAt: serverTimestamp(),
     });
     await upsertContactFromBot(db, phone, pushName, "lead", { service: result.saveQuote.servico });
+
+    try {
+      const especialistaMsg = buildEspecialistaMessage({ phone, pushName, data: result.saveQuote });
+      await sendText(ESPECIALISTA_WHATSAPP, especialistaMsg);
+    } catch (notifyErr) {
+      console.error("Erro ao notificar especialista sobre o orçamento:", notifyErr);
+    }
   }
 
   if (result.saveSupplierCategory) {
