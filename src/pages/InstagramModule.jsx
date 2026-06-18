@@ -4,22 +4,17 @@ import PostGenerator from "../instagram/PostGenerator";
 import PhotoEditor from "../instagram/PhotoEditor";
 import ThemeBank from "../instagram/ThemeBank";
 import WeeklyPlanner from "../instagram/WeeklyPlanner";
+import ApprovalQueue from "../instagram/ApprovalQueue";
 import PostsList from "../instagram/PostsList";
 import { usePosts } from "../instagram/usePosts";
 import { useThemeBank } from "../instagram/useThemeBank";
-
-const TABS = [
-  { id: "week", label: "Semana Automática", icon: CalendarDays },
-  { id: "generate", label: "Gerar Post", icon: Sparkles },
-  { id: "editor", label: "Editor de Fotos", icon: ImageIcon },
-  { id: "bank", label: "Banco de Temas", icon: Grid3x3 },
-  { id: "posts", label: "Meus Posts", icon: List },
-];
 
 export default function InstagramModule() {
   const [tab, setTab] = useState("week");
   const { posts, savePost, deletePost, updatePost } = usePosts();
   const { photos, loading: bankLoading, addPhoto, removePhoto } = useThemeBank();
+
+  const pendingCount = posts.filter((p) => p.status === "aguardando_aprovacao").length;
 
   async function handleSaveToBank(data) {
     await addPhoto(data);
@@ -63,19 +58,58 @@ export default function InstagramModule() {
       </div>
 
       <div className="tabs crm-tabs">
-        {TABS.map(({ id, label, icon: Icon }) => (
+        {[
+          { id: "week", label: "Semana Automática", icon: CalendarDays },
+          { id: "generate", label: "Gerar Post", icon: Sparkles },
+          { id: "editor", label: "Editor de Fotos", icon: ImageIcon },
+          { id: "bank", label: "Banco de Temas", icon: Grid3x3 },
+          { id: "posts", label: "Meus Posts", icon: List },
+        ].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             className={"tab" + (tab === id ? " active" : "")}
             onClick={() => setTab(id)}
+            style={{ position: "relative" }}
           >
             <Icon size={14} /> {label}
+            {/* Badge de notificação: aparece quando há posts aguardando aprovação */}
+            {id === "week" && pendingCount > 0 && (
+              <span style={{
+                position: "absolute",
+                top: -4,
+                right: -4,
+                background: "var(--accent-pink, #e91e8c)",
+                color: "#fff",
+                borderRadius: "50%",
+                fontSize: 10,
+                fontWeight: 700,
+                minWidth: 17,
+                height: 17,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "0 4px",
+                lineHeight: 1,
+              }}>
+                {pendingCount}
+              </span>
+            )}
           </button>
         ))}
       </div>
 
       {tab === "week" && (
-        <WeeklyPlanner themeBankPhotos={photos} onSavePost={savePost} />
+        <>
+          {/* Fila de aprovação — aparece no topo se houver posts pendentes */}
+          {pendingCount > 0 && (
+            <ApprovalQueue
+              posts={posts}
+              onUpdate={updatePost}
+              onDelete={deletePost}
+            />
+          )}
+          <WeeklyPlanner themeBankPhotos={photos} onSavePost={savePost} />
+        </>
       )}
 
       {tab === "generate" && (
