@@ -1195,6 +1195,7 @@ input[type="range"] { padding: 0; background: none; }
 .inbox-status-select.status-lead { border-color: #93B4F8; background: #EFF6FF; color: var(--blue); }
 .inbox-status-select.status-proposta { border-color: #F3CC8C; background: #FFFBEB; color: #B45309; }
 .inbox-status-select.status-contrato { border-color: #8FE0DC; background: #ECFEFF; color: #0B8A86; }
+.inbox-status-select.status-cliente { border-color: #86EFAC; background: #F0FDF4; color: #15803D; }
 .inbox-status-select.status-funcionario { border-color: #C4B5FD; background: #F5F3FF; color: #6D28D9; }
 .inbox-status-select.status-curriculo { border-color: #F9A8D4; background: #FDF2F8; color: #DB2777; }
 .inbox-status-select.status-inativo { border-color: var(--gray-light); background: #F8FAFC; color: var(--gray); }

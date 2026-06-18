@@ -13,6 +13,7 @@ export default function Dashboard() {
     lead: contacts.filter((c) => (c.status || "lead") === "lead").length,
     proposta: contacts.filter((c) => c.status === "proposta").length,
     contrato: contacts.filter((c) => c.status === "contrato").length,
+    cliente: contacts.filter((c) => c.status === "cliente").length,
   };
 
   return (
@@ -75,6 +76,7 @@ export default function Dashboard() {
           <MiniStat label="Lead" value={byStatus.lead} color="#1A56DB" />
           <MiniStat label="Proposta" value={byStatus.proposta} color="#D97706" />
           <MiniStat label="Contrato" value={byStatus.contrato} color="#0EA5A0" />
+          <MiniStat label="Cliente" value={byStatus.cliente} color="#15803D" />
         </div>
         <Link to="/crm" className="btn btn-outline btn-sm" style={{ marginTop: 14 }}>
           Ver pipeline completo →

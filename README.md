@@ -5,6 +5,15 @@ Plataforma única que unifica os três projetos da LCS Terceirização:
 - **Instagram** (legendas, fotos reais, agendamento) — antes em `lcsi-nstagram`
 - **Google Ads** (otimização com IA) — antes em `lcs-optimizer`
 
+### Melhoria — Novo status "Cliente" (suporte pós-venda)
+Adicionado o status **Cliente** ao CRM, representando clientes ativos que já têm o serviço
+rodando e recebem suporte pós-venda — separado de **Contrato** (negociação/assinatura fechada).
+Adicionado nas três listas de status existentes (`Inbox.jsx`, `ContactModal.jsx`,
+`KanbanBoard.jsx`) e ao `Dashboard.jsx`. Assim como Contrato e Funcionário, contatos em
+**Cliente** nunca são reclassificados automaticamente pela classificação por palavra-chave —
+uma pergunta de um cliente ativo sobre preço de um serviço extra não deve fazê-lo "voltar" para
+Lead.
+
 ## Status: Fase 5 em andamento 🟡
 
 ### Melhoria — Classificação automática de contatos por palavra-chave

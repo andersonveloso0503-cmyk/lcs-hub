@@ -44,7 +44,7 @@ const LEAD_KEYWORDS = [
 
 // Status que representam relações já consolidadas — a classificação
 // automática nunca os sobrescreve.
-const PROTECTED_STATUSES = ["contrato", "funcionario"];
+const PROTECTED_STATUSES = ["contrato", "cliente", "funcionario"];
 
 function containsKeyword(text, keywords) {
   const normalized = (text || "").toLowerCase();
