@@ -172,6 +172,12 @@ function emptyState() {
   return { menu: "main", step: 0, data: {} };
 }
 
+// Quantas vezes seguidas o bot pode mandar o menu principal sem a pessoa
+// escolher uma opção válida, antes de desistir e ficar em silêncio. Evita
+// ficar respondendo em loop quando quem está do outro lado é um número que
+// manda mensagem automática (propaganda, robô, etc) e não vai escolher nada.
+const MAX_UNANSWERED_GREETINGS = 2;
+
 function processMessage({ text, pushName, state }) {
   const incoming = (text || "").trim();
   const current = state && state.menu ? state : emptyState();
@@ -193,13 +199,31 @@ function processMessage({ text, pushName, state }) {
       return handleVendasMenu(incoming);
     case "main":
     default:
-      return handleMainMenu(incoming, pushName);
+      return handleMainMenu(incoming, pushName, current);
   }
 }
 
-function handleMainMenu(incoming, pushName) {
+function handleMainMenu(incoming, pushName, current) {
   if (!["1", "2", "3", "4", "5"].includes(incoming)) {
-    return { replies: [mainMenuMessage(pushName)], newState: emptyState() };
+    const greetCount = (current?.greetCount || 0) + 1;
+
+    if (greetCount > MAX_UNANSWERED_GREETINGS) {
+      // Já mandamos o menu algumas vezes e a pessoa nunca escolheu uma opção
+      // válida — provavelmente é uma mensagem automática (propaganda, robô,
+      // número errado). Agradece, encerra e fica em silêncio pra não ficar
+      // respondendo em loop.
+      return {
+        replies: [
+          "Agradecemos o contato! 🙏 Se precisar de algo, é só mandar *menu* por aqui que a gente te ajuda.",
+        ],
+        newState: { ...emptyState(), paused: true, pausedReason: "sem_resposta_valida" },
+      };
+    }
+
+    return {
+      replies: [mainMenuMessage(pushName)],
+      newState: { menu: "main", step: 0, data: {}, greetCount },
+    };
   }
 
   if (incoming === "1") {
@@ -508,11 +532,22 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
   const stateSnap = await getDoc(stateRef);
   const state = stateSnap.exists() ? stateSnap.data() : null;
 
-  if (state?.paused) return;
+  // Se estiver pausado (ex: um atendente humano assumiu a conversa), o bot
+  // fica em silêncio — a não ser que a pessoa mande "menu"/"voltar", caso em
+  // que entendemos que ela quer retomar o atendimento automático.
+  const wantsToResume = messageDoc.type === "text" && isMenuCommand(messageDoc.text);
+  if (state?.paused && !wantsToResume) return;
 
   if (messageDoc.type === "document" && state?.menu === "curriculo_aguardando") {
     await sendTextSequence(phone, [curriculoRecebidoMensagem()]);
-    await setDoc(stateRef, { menu: "main", step: 0, data: {}, paused: false, updatedAt: serverTimestamp() });
+    await setDoc(stateRef, {
+      menu: "main",
+      step: 0,
+      data: {},
+      paused: false,
+      lastBotSentAt: Date.now(),
+      updatedAt: serverTimestamp(),
+    });
     return;
   }
 
@@ -520,8 +555,15 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
 
   const result = processMessage({ text: messageDoc.text, pushName, state });
 
+  let sentMessageIds = [];
   if (result.replies?.length) {
-    await sendTextSequence(phone, result.replies);
+    // Marca o horário ANTES de enviar — assim, se o eco da própria mensagem
+    // do bot voltar pelo webhook rapidinho, já encontra esse valor salvo.
+    await setDoc(stateRef, { lastBotSentAt: Date.now() }, { merge: true });
+    const sendResults = await sendTextSequence(phone, result.replies);
+    sentMessageIds = sendResults
+      .map((r) => r?.data?.key?.id)
+      .filter(Boolean);
   }
 
   await setDoc(stateRef, {
@@ -529,6 +571,9 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
     step: result.newState.step,
     data: result.newState.data || {},
     paused: !!result.newState.paused,
+    greetCount: result.newState.greetCount || 0,
+    lastBotSentAt: Date.now(),
+    lastBotMessageIds: sentMessageIds,
     updatedAt: serverTimestamp(),
   });
 
@@ -558,6 +603,42 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
     await upsertContactFromBot(db, phone, pushName, null, {
       tipo: "fornecedor",
       categoriaFornecedor: result.saveSupplierCategory,
+    });
+  }
+}
+
+// Quanto tempo (em ms) depois de o bot mandar uma mensagem ainda consideramos
+// que um evento "fromMe" recebido é só o eco da própria mensagem do bot
+// voltando pelo webhook, e não um atendente digitando na mão.
+const BOT_ECHO_WINDOW_MS = 10000;
+
+/**
+ * Roda para toda mensagem ENVIADA pela LCS (fromMe: true). Se não for o eco
+ * de uma mensagem que o próprio bot mandou, entendemos que foi um atendente
+ * humano respondendo manualmente (pelo app do WhatsApp Business ou pelo
+ * CRM) e pausamos o agente nesse contato.
+ */
+async function handlePossibleHumanIntervention({ db, phone, messageId, messageTimestamp }) {
+  const stateRef = doc(db, "bot_state", phone);
+  const stateSnap = await getDoc(stateRef);
+
+  // O bot nunca interagiu com esse contato — não há nada pra pausar.
+  if (!stateSnap.exists()) return;
+
+  const state = stateSnap.data();
+  const sentIds = state.lastBotMessageIds || [];
+  const withinEchoWindow =
+    state.lastBotSentAt && messageTimestamp - state.lastBotSentAt < BOT_ECHO_WINDOW_MS;
+
+  const isBotEcho = (messageId && sentIds.includes(messageId)) || withinEchoWindow;
+  if (isBotEcho) return;
+
+  if (!state.paused) {
+    await setDoc(stateRef, {
+      ...state,
+      paused: true,
+      pausedReason: "atendimento_humano",
+      updatedAt: serverTimestamp(),
     });
   }
 }
@@ -738,6 +819,22 @@ export default async function handler(req, res) {
         }
       } catch (botErr) {
         console.error("Erro no agente de IA do WhatsApp:", botErr);
+      }
+    } else {
+      // Mensagem enviada PELA LCS. Pode ser uma resposta automática do
+      // próprio bot (que sai pelo mesmo número) ou um atendente humano
+      // respondendo na mão, pelo WhatsApp Business ou pelo CRM. Se for
+      // humano, pausamos o agente nesse contato pra não atropelar o
+      // atendimento.
+      try {
+        await handlePossibleHumanIntervention({
+          db,
+          phone,
+          messageId: data.key?.id,
+          messageTimestamp,
+        });
+      } catch (humanErr) {
+        console.error("Erro ao checar intervenção humana:", humanErr);
       }
     }
 
