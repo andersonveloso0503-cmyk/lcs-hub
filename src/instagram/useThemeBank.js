@@ -35,10 +35,15 @@ export function useThemeBank() {
   }, []);
 
   async function addPhoto(data) {
-    return addDoc(collection(db, COLLECTION), {
-      ...data,
-      createdAt: serverTimestamp(),
-    });
+    try {
+      return await addDoc(collection(db, COLLECTION), {
+        ...data,
+        createdAt: serverTimestamp(),
+      });
+    } catch (err) {
+      console.error("Erro ao salvar foto no Banco de Temas:", err);
+      throw err; // propaga para quem chamou (PhotoEditor) mostrar o erro na tela
+    }
   }
 
   async function removePhoto(id) {

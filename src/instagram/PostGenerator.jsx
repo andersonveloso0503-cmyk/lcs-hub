@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Sparkles, Send, Calendar, Copy, Image as ImageIcon } from "lucide-react";
-import { generateCaption, uploadImage, scheduleToBuffer } from "./api";
+import { generateCaption, scheduleToBuffer } from "./api";
 
 const SERVICE_OPTIONS = [
   "Limpeza e Conservação",
@@ -39,11 +39,12 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
   const [scheduledAt, setScheduledAt] = useState("");
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
+  const [showAllPhotos, setShowAllPhotos] = useState(false);
 
   const matchingPhotos = themeBankPhotos.filter((p) =>
     service.toLowerCase().includes(p.service?.toLowerCase().split(" ")[0] || "zzz")
   );
-  const photosToShow = matchingPhotos.length > 0 ? matchingPhotos : themeBankPhotos;
+  const photosToShow = showAllPhotos || matchingPhotos.length === 0 ? themeBankPhotos : matchingPhotos;
   const selectedPhoto = themeBankPhotos.find((p) => p.id === selectedPhotoId);
 
   async function handleGenerate() {
@@ -71,16 +72,11 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
     setError("");
     setSendResult(null);
 
-    const upload = await uploadImage(selectedPhoto.imageDataUrl, `post-${Date.now()}.png`);
-    if (!upload.ok) {
-      setError("Erro no upload da imagem: " + upload.error);
-      setSending(false);
-      return;
-    }
-
+    // A foto do Banco de Temas já é uma URL pública do Vercel Blob — não
+    // precisa de upload novamente.
     const result = await scheduleToBuffer({
       text: caption,
-      imageUrl: upload.url,
+      imageUrl: selectedPhoto.imageUrl,
       scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : null,
     });
 
@@ -90,12 +86,18 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
         const failed = result.results?.filter((r) => !r.ok).map((r) => r.channel).join(", ");
         setError(`Publicado parcialmente — falhou em: ${failed}`);
       }
+      // Guarda os IDs dos posts criados no Buffer (um por canal bem-sucedido),
+      // para permitir excluir ou trocar a imagem depois direto no Buffer.
+      const bufferPostIds = (result.results || [])
+        .filter((r) => r.ok && r.post?.id)
+        .map((r) => r.post.id);
       await onSavePost({
         service,
         caption,
-        imageUrl: upload.url,
+        imageUrl: selectedPhoto.imageUrl,
         status: scheduledAt ? "agendado" : "publicado",
         scheduledAt: scheduledAt || null,
+        bufferPostIds,
       });
     } else {
       setError("Erro ao agendar no Buffer: " + result.error);
@@ -107,7 +109,7 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
     await onSavePost({
       service,
       caption,
-      imageUrl: selectedPhoto?.imageDataUrl || null,
+      imageUrl: selectedPhoto?.imageUrl || null,
       status: "rascunho",
     });
     setSendResult({ ok: true, draft: true });
@@ -195,9 +197,22 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
 
       {caption && !generating && (
         <div className="card">
-          <div className="card-title">
-            <ImageIcon size={15} style={{ marginRight: 6, verticalAlign: "-2px" }} />
-            Escolha uma foto do Banco de Temas
+          <div
+            className="card-title"
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
+          >
+            <span>
+              <ImageIcon size={15} style={{ marginRight: 6, verticalAlign: "-2px" }} />
+              Escolha uma foto do Banco de Temas
+            </span>
+            {matchingPhotos.length > 0 && matchingPhotos.length < themeBankPhotos.length && (
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={() => setShowAllPhotos((v) => !v)}
+              >
+                {showAllPhotos ? `Só de ${service}` : `Ver todas (${themeBankPhotos.length})`}
+              </button>
+            )}
           </div>
 
           {photosToShow.length === 0 ? (
@@ -213,7 +228,7 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
                   className={"photo-card selectable" + (selectedPhotoId === p.id ? " selected" : "")}
                   onClick={() => setSelectedPhotoId(p.id)}
                 >
-                  <img src={p.imageDataUrl} alt={p.service} />
+                  <img src={p.imageUrl} alt={p.service} />
                 </div>
               ))}
             </div>

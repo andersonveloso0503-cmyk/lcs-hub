@@ -46,6 +46,49 @@ Pipeline em Kanban, WhatsApp integrado (envia e recebe via Evolution API), follo
 - Nova barra de navegação inferior fixa, visível só em telas pequenas, com acesso direto a Dashboard, CRM, Instagram e Google Ads
 - **Como instalar**: abra `lcs-hub.vercel.app` no navegador do celular → no Android (Chrome), toque no menu (⋮) → "Adicionar à tela inicial" ou "Instalar app"; no iPhone (Safari), toque no ícone de compartilhar → "Adicionar à Tela de Início"
 
+### Melhoria — Cards do Dashboard clicáveis
+- Os cards de estatística da Visão Geral (Contatos no CRM, Follow-up Pendente, Conversas no WhatsApp, Instagram) agora são clicáveis, levando direto para a tela relevante
+- Atualizado o card "Próximos módulos" para refletir o estado real do projeto (CRM e Instagram já disponíveis, Google Ads em construção)
+
+### Melhoria — Status "Currículo" + suporte a documentos e imagens no WhatsApp
+- Nova coluna no pipeline: **Currículo**, ao lado de Funcionário — para separar candidatos de leads de venda
+- O sistema agora reconhece e exibe **imagens** e **documentos/PDFs** recebidos pelo WhatsApp (antes só texto e áudio eram tratados; documentos apareciam como "mensagem sem texto/mídia")
+- Imagens aparecem como miniatura clicável no chat; documentos aparecem como um card com nome do arquivo, clicável para abrir/baixar
+- Toda mídia recebida (áudio, imagem, documento) é enviada para o Vercel Blob e só a URL é salva no Firestore — evita o mesmo problema de limite de 1MB por documento que já corrigimos no Banco de Temas (currículos em PDF frequentemente passam desse limite)
+- Classifique a conversa como "Currículo" direto na Inbox, do mesmo jeito que já funciona para os outros status
+
+### Ajuste — Publicação só no Instagram (plano Buffer atual permite 1 canal)
+O plano Essentials do Buffer inclui apenas 1 canal social conectado por vez. Como Instagram e Facebook não podem ficar ativos simultaneamente sem adicionar um segundo canal pago (~$5-6/mês extra), o agendamento foi ajustado para publicar **só no Instagram** por padrão. O código de integração com Facebook continua no projeto, desativado — pode ser reativado facilmente caso decida adicionar o segundo canal no futuro.
+
+### Melhoria — Cards clicáveis no Instagram + nova aba "Meus Posts"
+- Os 3 cards de estatística no topo do Instagram (Posts criados, Fotos no banco, Agendados) agora são clicáveis
+- Nova aba **Meus Posts**, com filtro por status (Todos, Rascunho, Agendado, Publicado) e contador em cada filtro
+- Cada post na lista mostra a foto, serviço, legenda, data de agendamento (quando houver), com opções de ver a foto em tamanho real ou remover o post
+
+### Melhoria — Criativos do Instagram com cards flutuantes sobre a foto
+Depois de revisar a primeira versão (bloco de marca inferior), o design foi refeito para um estilo modular: a foto real agora cobre todo o canvas, com uma leve vinheta escura para garantir contraste. Por cima, três cards sólidos flutuantes nas cores da marca — um card dourado no canto superior esquerdo com ícone + nome do serviço, um card grande azul royal (ou bordô, dependendo do tema) com o título de destaque, e um card pequeno bordô com o telefone de contato — além da logo real da LCS flutuando direto sobre a foto, sem caixa própria. Layout testado e calibrado para não cortar nem sobrepor nada, tanto em post (quadrado) quanto stories (vertical).
+
+### Melhoria — Excluir e trocar foto de posts agendados, sincronizado com o Buffer
+Na aba "Meus Posts", agora é possível excluir um post ou trocar sua foto, e isso reflete automaticamente no Buffer também (não só aqui no app). Ao agendar um post novo, o ID que o Buffer retorna é salvo junto com o registro no Firestore — isso permite usar as mutations `deletePost` e `editPost` da API do Buffer para excluir o agendamento real ou substituir a imagem sem precisar recriar o post do zero. Posts criados antes desta atualização não têm esse ID salvo, então excluir/trocar a foto deles só afeta o registro aqui no app — para esses, é necessário ajustar manualmente direto no painel do Buffer também.
+
+## ⚠️ Correção crítica — Agendamento no Buffer falhando ("Access token is not valid")
+
+### Melhoria — Banco de Temas mostrando poucas fotos no Gerador de Post
+O Gerador de Post filtra automaticamente as fotos do Banco de Temas pelo serviço selecionado (ex: só mostra fotos de "Limpeza" quando o serviço escolhido é Limpeza). Esse filtro continua, mas agora aparece um botão "Ver todas (N)" sempre que existirem fotos escondidas pelo filtro — permitindo alternar entre ver só as fotos do serviço atual ou o Banco de Temas completo.
+
+### Melhoria — Sugestão de título de destaque com IA
+No Editor de Fotos, o campo de título de destaque (headline que é desenhado na imagem) agora tem um botão "Sugerir com IA" que gera um título curto e criativo baseado no serviço selecionado, sem precisar analisar a foto. Endpoint dedicado e leve (`/api/generate-headline`, Claude Haiku, sem hashtags/emoji/pontuação).
+
+### Melhoria — Criativo completo gerado por IA (sem precisar de foto própria)
+Nova seção no Editor de Fotos: "Criativo pronto com IA". Em vez do fluxo normal (foto real + cards desenhados com precisão via Canvas), essa opção usa o modelo `gpt-image-1.5` da OpenAI (qualidade "medium") para gerar a imagem inteira do zero (foto + textos + cards, tudo junto), a partir de um prompt detalhado com o serviço, título de destaque e as cores da marca. Variável de ambiente nova: `OPENAI_API_KEY`. **Esse recurso tem custo real, cobrado direto na conta OpenAI** — aproximadamente $0.03–0.04 por imagem quadrada (post) e $0.05–0.06 por imagem vertical (stories), não é gratuito. **Limitação importante e avisada na interface**: modelos de geração de imagem podem errar a escrita de texto dentro da imagem (nome, telefone, etc.) — o resultado deve sempre ser revisado visualmente antes de salvar ou publicar.
+Investigação completa revelou duas causas combinadas: (1) a variável `BUFFER_API_KEY` nunca tinha sido configurada no projeto `lcs-hub` na Vercel (existia apenas no projeto antigo do Instagram), fazendo a chave chegar como `undefined`; (2) a mutation de criar post estava faltando o bloco `metadata: { instagram: { type, shouldShareToFeed } }`, exigido pelo Instagram — sem ele, o Buffer rejeita a postagem com um erro de autenticação que, na prática, mascarava o problema real de validação. Ambos corrigidos: a chave nova foi configurada na Vercel, e o bloco de metadata foi restaurado na mutation. Testado e confirmado funcionando via chamada direta à API antes de aplicar no código.
+
+## ⚠️ Correção crítica — Barra de navegação não aparecia no celular
+Havia duas regras CSS conflitantes para `.bottom-nav`: uma dentro do media query mobile (`display: flex`) e outra fora dele (`display: none`), declarada depois — a segunda sempre vencia, escondendo a barra em qualquer tela. Corrigida a ordem das regras. Também corrigido o logo "LCS Hub" sobrepondo os ícones de status do celular (hora/wifi/bateria) quando instalado como PWA — adicionado respeito à área segura do topo (`safe-area-inset-top`).
+
+## ⚠️ Correção crítica — Fotos do Banco de Temas não salvavam
+As fotos estilizadas no Editor de Fotos eram salvas como base64 (texto longo, geralmente 1-3MB) direto no Firestore — que tem um limite rígido de 1MB por documento. A escrita falhava silenciosamente, sem nenhum erro visível, dando a impressão de que a foto "desaparecia" ao trocar de aba. Corrigido fazendo upload da imagem para o Vercel Blob primeiro (mesmo serviço já usado para o agendamento no Buffer) e salvando só a URL no Firestore — leve e sem limite de tamanho problemático. Também adicionamos feedback visual real no botão de salvar (carregando / sucesso / erro), que antes não existia.
+
 ## ⚠️ Correção crítica — Buffer API (endpoint e sintaxe estavam errados)
 Durante os testes reais, descobrimos que o endpoint usado até aqui (`graph.buffer.com`) estava incorreto — a documentação oficial atual confirma que o endpoint correto é **`api.buffer.com`**, com uma sintaxe de mutation diferente (union type `PostActionSuccess`/`MutationError`, imagem via `assets: [{ image: { url } }]`, agendamento via `mode: customScheduled` + `dueAt`). O `api/buffer-schedule.js` foi totalmente reescrito seguindo a documentação oficial confirmada em `developers.buffer.com`. Também corrigimos um erro de digitação no Channel ID do Instagram (era `c487`, o correto é `c687`), confirmado consultando a API em tempo real.
 
@@ -69,6 +112,7 @@ Além disso (configuradas anteriormente):
 ANTHROPIC_API_KEY = (gerar em console.anthropic.com → API Keys)
 BUFFER_API_KEY    = 7bapnxk-EY4t_nyw8veZ4x7Gv2j1oWQsiemb8kELYbj
 BLOB_READ_WRITE_TOKEN = (gerado automaticamente ao conectar o Blob Store ao projeto)
+OPENAI_API_KEY    = (gerar em platform.openai.com/api-keys — usado só pelo "Criativo pronto com IA")
 ```
 
 ### Configurar o Facebook como segundo canal

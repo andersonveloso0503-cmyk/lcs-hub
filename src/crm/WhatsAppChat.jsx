@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, Loader2, Mic, Square, Trash2, Play, Pause } from "lucide-react";
+import { Send, Loader2, Mic, Square, Trash2, Play, Pause, FileText } from "lucide-react";
 import { sendWhatsAppMessage, sendWhatsAppAudio } from "../services/evolutionApi";
 import { useAudioRecorder } from "./useAudioRecorder";
 
@@ -151,16 +151,40 @@ export default function WhatsAppChat({ phone, messages, onSent, onSentAudio, con
             formatDateLabel(msg.messageTimestamp) !==
               formatDateLabel(messages[i - 1].messageTimestamp);
           const isAudio = msg.type === "audio" && msg.audioUrl;
+          const isImage = msg.type === "image" && msg.fileUrl;
+          const isDocument = msg.type === "document" && msg.fileUrl;
           return (
             <div key={msg.id || i}>
               {showDateLabel && (
                 <div className="chat-date-divider">{formatDateLabel(msg.messageTimestamp)}</div>
               )}
               <div className={"chat-bubble-row" + (msg.fromMe ? " from-me" : "")}>
-                <div className={"chat-bubble" + (msg.fromMe ? " from-me" : "") + (isAudio ? " audio-bubble" : "")}>
-                  {isAudio ? (
-                    <AudioBubblePlayer src={msg.audioUrl} fromMe={msg.fromMe} />
-                  ) : (
+                <div
+                  className={
+                    "chat-bubble" +
+                    (msg.fromMe ? " from-me" : "") +
+                    (isAudio ? " audio-bubble" : "") +
+                    (isImage ? " image-bubble" : "")
+                  }
+                >
+                  {isAudio && <AudioBubblePlayer src={msg.audioUrl} fromMe={msg.fromMe} />}
+                  {isImage && (
+                    <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
+                      <img src={msg.fileUrl} alt={msg.text} className="chat-image-attachment" />
+                    </a>
+                  )}
+                  {isDocument && (
+                    <a
+                      href={msg.fileUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="chat-document-attachment"
+                    >
+                      <FileText size={18} />
+                      <span>{msg.fileName || "Documento"}</span>
+                    </a>
+                  )}
+                  {!isAudio && !isImage && !isDocument && (
                     <span className="chat-bubble-text">{msg.text}</span>
                   )}
                   <span className="chat-bubble-time">{formatTime(msg.messageTimestamp)}</span>

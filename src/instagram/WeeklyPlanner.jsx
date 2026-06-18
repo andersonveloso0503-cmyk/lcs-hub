@@ -43,12 +43,14 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
         const photo = pickPhotoForService(p.service, usedIds);
         if (photo) usedIds.add(photo.id);
 
-        let photoUrl = photo?.imageDataUrl || null;
+        let photoUrl = photo?.imageUrl || null;
+        let isAdapted = false;
         if (photoUrl && p.format === "stories") {
           photoUrl = await adaptToStoriesFormat(photoUrl, photo?.theme || "azul");
+          isAdapted = true; // resultado é base64 local, precisa de upload antes do Buffer
         }
 
-        return { ...p, photoId: photo?.id || null, photoUrl };
+        return { ...p, photoId: photo?.id || null, photoUrl, isAdapted };
       })
     );
 
@@ -70,7 +72,8 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
     const nextIdx = (currentIdx + 1) % themeBankPhotos.length;
     const next = themeBankPhotos[nextIdx] === post.photoId ? candidates[0] : themeBankPhotos[nextIdx];
     updatePost(index, "photoId", next.id);
-    updatePost(index, "photoUrl", next.imageDataUrl);
+    updatePost(index, "photoUrl", next.imageUrl);
+    updatePost(index, "isAdapted", false);
   }
 
   async function handleApproveAndScheduleAll() {
@@ -82,25 +85,36 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
     for (const post of posts) {
       if (!post.photoUrl) continue;
 
-      const upload = await uploadImage(post.photoUrl, `week-post-${Date.now()}.png`);
-      if (!upload.ok) {
-        setError(`Erro no upload da foto de ${post.day}: ${upload.error}`);
-        continue;
+      // Se a foto foi adaptada para o formato stories, ela é um base64 novo
+      // gerado localmente e precisa de upload. Se não foi adaptada, já é uma
+      // URL pública do Blob (vinda do Banco de Temas) e pode ser usada direto.
+      let finalImageUrl = post.photoUrl;
+      if (post.isAdapted) {
+        const upload = await uploadImage(post.photoUrl, `week-post-${Date.now()}.png`);
+        if (!upload.ok) {
+          setError(`Erro no upload da foto de ${post.day}: ${upload.error}`);
+          continue;
+        }
+        finalImageUrl = upload.url;
       }
 
       const result = await scheduleToBuffer({
         text: post.caption,
-        imageUrl: upload.url,
+        imageUrl: finalImageUrl,
         scheduledAt: post.scheduledAt,
       });
 
       if (result.ok || result.partial) {
+        const bufferPostIds = (result.results || [])
+          .filter((r) => r.ok && r.post?.id)
+          .map((r) => r.post.id);
         await onSavePost({
           service: post.service,
           caption: post.caption,
-          imageUrl: upload.url,
+          imageUrl: finalImageUrl,
           status: "agendado",
           scheduledAt: post.scheduledAt,
+          bufferPostIds,
         });
         setSentCount((c) => c + 1);
 

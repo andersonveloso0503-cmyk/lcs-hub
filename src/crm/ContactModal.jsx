@@ -9,6 +9,7 @@ const STATUS_OPTIONS = [
   { value: "proposta", label: "Proposta" },
   { value: "contrato", label: "Contrato" },
   { value: "funcionario", label: "Funcionário" },
+  { value: "curriculo", label: "Currículo" },
   { value: "inativo", label: "Inativo" },
 ];
 

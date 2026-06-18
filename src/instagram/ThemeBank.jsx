@@ -24,7 +24,7 @@ export default function ThemeBank({ photos, loading, onRemove }) {
             <button className="photo-remove" onClick={() => onRemove(p.id)}>
               <Trash2 size={13} />
             </button>
-            <img src={p.imageDataUrl} alt={p.service} />
+            <img src={p.imageUrl} alt={p.service} />
             <span className="kanban-tag" style={{ margin: "8px auto 0" }}>
               {p.service}
             </span>

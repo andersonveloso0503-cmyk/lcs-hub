@@ -5,6 +5,7 @@ export const FOLLOWUP_RULES = {
   proposta: 3,
   contrato: 7,
   funcionario: null, // funcionários não entram no fluxo de follow-up de vendas
+  curriculo: null, // currículos não entram no fluxo de follow-up de vendas
   inativo: null, // nunca alerta
 };
 

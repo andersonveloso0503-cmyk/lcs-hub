@@ -7,6 +7,7 @@ const COLUMNS = [
   { id: "proposta", label: "Proposta", color: "#D97706" },
   { id: "contrato", label: "Contrato", color: "#0EA5A0" },
   { id: "funcionario", label: "Funcionário", color: "#6D28D9" },
+  { id: "curriculo", label: "Currículo", color: "#DB2777" },
   { id: "inativo", label: "Inativo", color: "#94A3B8" },
 ];
 

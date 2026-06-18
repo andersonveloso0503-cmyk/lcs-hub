@@ -39,29 +39,33 @@ export default function Dashboard() {
 
       <div className="stat-grid">
         <StatCard
+          to="/crm"
           icon={Users}
           label="Contatos no CRM"
           value={loading ? "—" : contacts.length}
           accent="blue"
         />
         <StatCard
+          to="/crm"
           icon={AlertCircle}
           label="Follow-up pendente"
           value={loading ? "—" : pendingFollowUps.length}
           accent={pendingFollowUps.length > 0 ? "amber" : "teal"}
         />
         <StatCard
+          to="/crm"
           icon={MessageCircle}
           label="Conversas no WhatsApp"
           value={conversations.length}
           accent="pink"
         />
         <StatCard
+          to="/instagram"
           icon={Search}
-          label="Campanhas ativas"
-          value="—"
+          label="Instagram"
+          value="Abrir"
           accent="amber"
-          note="módulo Google Ads em breve"
+          note="legendas, fotos e Buffer"
         />
       </div>
 
@@ -97,19 +101,20 @@ export default function Dashboard() {
       )}
 
       <div className="card">
-        <h3 className="card-title">Próximos módulos</h3>
+        <h3 className="card-title">Módulos disponíveis</h3>
         <ul className="roadmap-list">
-          <li><strong>Instagram</strong> — legendas, imagens e Buffer (Fase 3)</li>
-          <li><strong>Google Ads</strong> — otimização com IA e dados reais (Fase 4)</li>
+          <li><strong>CRM</strong> — pipeline, WhatsApp (texto e áudio), follow-up automático</li>
+          <li><strong>Instagram</strong> — legendas com IA, editor de fotos, semana automática, Buffer (Instagram + Facebook)</li>
+          <li><strong>Google Ads</strong> — em construção (Fase 4)</li>
         </ul>
       </div>
     </div>
   );
 }
 
-function StatCard({ icon: Icon, label, value, accent, note }) {
-  return (
-    <div className={`stat-card accent-${accent}`}>
+function StatCard({ to, icon: Icon, label, value, accent, note }) {
+  const content = (
+    <>
       <div className="stat-icon">
         <Icon size={20} />
       </div>
@@ -118,8 +123,18 @@ function StatCard({ icon: Icon, label, value, accent, note }) {
         <div className="stat-value">{value}</div>
         {note && <div className="stat-note">{note}</div>}
       </div>
-    </div>
+    </>
   );
+
+  if (to) {
+    return (
+      <Link to={to} className={`stat-card accent-${accent} clickable`}>
+        {content}
+      </Link>
+    );
+  }
+
+  return <div className={`stat-card accent-${accent}`}>{content}</div>;
 }
 
 function MiniStat({ label, value, color }) {

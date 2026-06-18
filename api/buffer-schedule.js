@@ -46,13 +46,20 @@ async function createPostForChannel(channelKey, { text, imageUrl, scheduledAt })
   const isScheduled = Boolean(scheduledAt);
   const escapedText = escapeGraphQLString(text);
 
+  // O Instagram exige metadata específica (tipo de post + se compartilha no
+  // feed). Outros canais (Facebook, etc.) não precisam desse bloco.
+  const metadataBlock =
+    channelKey === "instagram"
+      ? `,\n        metadata: { instagram: { type: post, shouldShareToFeed: true } }`
+      : "";
+
   const query = `
     mutation CreatePost {
       createPost(input: {
         text: "${escapedText}",
         channelId: "${channel.id}",
         schedulingType: automatic,
-        mode: ${isScheduled ? "customScheduled" : "addToQueue"}${isScheduled ? `,\n        dueAt: "${scheduledAt}"` : ""},
+        mode: ${isScheduled ? "customScheduled" : "addToQueue"}${isScheduled ? `,\n        dueAt: "${scheduledAt}"` : ""}${metadataBlock},
         assets: [
           {
             image: {
@@ -112,10 +119,14 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Campos 'text' e 'imageUrl' são obrigatórios" });
     }
 
-    // Por padrão, publica em ambos os canais configurados
+    // Por padrão, publica só no Instagram — o plano atual do Buffer (Essentials)
+    // inclui apenas 1 canal, então Facebook fica desativado por padrão para não
+    // gerar erro de token/canal indisponível. Para reativar o Facebook no futuro
+    // (após adicionar um segundo canal pago no Buffer), troque para
+    // ["instagram", "facebook"] ou peça para o Claude reativar.
     const targetChannels = Array.isArray(channels) && channels.length > 0
       ? channels
-      : ["instagram", "facebook"];
+      : ["instagram"];
 
     const results = await Promise.all(
       targetChannels.map((ch) => createPostForChannel(ch, { text, imageUrl, scheduledAt }))

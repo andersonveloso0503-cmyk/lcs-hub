@@ -4,9 +4,14 @@
 //
 // Salva a mensagem em Firestore na coleção "whatsapp_messages", usando o número
 // de telefone (sem o sufixo @s.whatsapp.net) como chave de agrupamento da conversa.
+//
+// Mídia (áudio, imagem, documento/PDF) é enviada para o Vercel Blob e só a URL
+// é salva no Firestore — documentos do Firestore têm limite de 1MB, e arquivos
+// de mídia (especialmente PDFs de currículo) costumam passar disso facilmente.
 
 import { initializeApp, getApps } from "firebase/app";
 import { getFirestore, collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { put } from "@vercel/blob";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
@@ -29,8 +34,8 @@ function getDb() {
 }
 
 /**
- * Busca a mídia de uma mensagem (áudio, imagem, etc.) já decodificada em base64,
- * direto da Evolution API, usando o ID da mensagem original.
+ * Busca a mídia de uma mensagem (áudio, imagem, documento, etc.) já decodificada
+ * em base64, direto da Evolution API, usando o ID da mensagem original.
  */
 async function fetchMediaBase64(messageId) {
   try {
@@ -50,9 +55,31 @@ async function fetchMediaBase64(messageId) {
     if (!res.ok) return null;
     const data = await res.json();
     if (!data?.base64) return null;
-    return { base64: data.base64, mimetype: data.mimetype || "audio/ogg" };
+    return { base64: data.base64, mimetype: data.mimetype || "application/octet-stream" };
   } catch (err) {
     console.error("Erro ao buscar mídia base64:", err);
+    return null;
+  }
+}
+
+/**
+ * Envia o conteúdo de mídia (base64) para o Vercel Blob e retorna a URL pública.
+ * Usado para áudio, imagem e documentos — nunca salvamos base64 grande direto
+ * no Firestore.
+ */
+async function uploadMediaToBlob(base64, mimetype, extensionHint) {
+  try {
+    const buffer = Buffer.from(base64, "base64");
+    const ext = extensionHint || mimetype.split("/")[1] || "bin";
+    const filename = `whatsapp-media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const blob = await put(filename, buffer, {
+      access: "public",
+      contentType: mimetype,
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+    });
+    return blob.url;
+  } catch (err) {
+    console.error("Erro ao enviar mídia para o Blob:", err);
     return null;
   }
 }
@@ -88,27 +115,67 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, skipped: true, reason: "no phone" });
     }
 
-    const isAudio = Boolean(data.message?.audioMessage);
+    const messageContent = data.message || {};
+    const isAudio = Boolean(messageContent.audioMessage);
+    const isImage = Boolean(messageContent.imageMessage);
+    const isDocument = Boolean(messageContent.documentMessage);
+
     let messageDoc;
 
     if (isAudio) {
       const media = await fetchMediaBase64(data.key?.id);
+      const mediaUrl = media
+        ? await uploadMediaToBlob(media.base64, media.mimetype, "ogg")
+        : null;
       messageDoc = {
         phone,
         fromMe,
         type: "audio",
         text: "🎤 Mensagem de voz",
-        audioUrl: media ? `data:${media.mimetype};base64,${media.base64}` : null,
-        durationSeconds: data.message.audioMessage?.seconds || 0,
+        audioUrl: mediaUrl,
+        durationSeconds: messageContent.audioMessage?.seconds || 0,
+        pushName,
+        messageTimestamp,
+        createdAt: serverTimestamp(),
+      };
+    } else if (isImage) {
+      const media = await fetchMediaBase64(data.key?.id);
+      const mediaUrl = media
+        ? await uploadMediaToBlob(media.base64, media.mimetype, "jpg")
+        : null;
+      messageDoc = {
+        phone,
+        fromMe,
+        type: "image",
+        text: messageContent.imageMessage?.caption || "📷 Imagem",
+        fileUrl: mediaUrl,
+        pushName,
+        messageTimestamp,
+        createdAt: serverTimestamp(),
+      };
+    } else if (isDocument) {
+      const media = await fetchMediaBase64(data.key?.id);
+      const fileName = messageContent.documentMessage?.fileName || "documento";
+      const mimetype = messageContent.documentMessage?.mimetype || "application/octet-stream";
+      const extFromName = fileName.includes(".") ? fileName.split(".").pop() : null;
+      const mediaUrl = media
+        ? await uploadMediaToBlob(media.base64, mimetype, extFromName)
+        : null;
+      messageDoc = {
+        phone,
+        fromMe,
+        type: "document",
+        text: `📄 ${fileName}`,
+        fileUrl: mediaUrl,
+        fileName,
         pushName,
         messageTimestamp,
         createdAt: serverTimestamp(),
       };
     } else {
       const text =
-        data.message?.conversation ||
-        data.message?.extendedTextMessage?.text ||
-        data.message?.imageMessage?.caption ||
+        messageContent.conversation ||
+        messageContent.extendedTextMessage?.text ||
         "(mensagem sem texto / mídia)";
       messageDoc = {
         phone,
