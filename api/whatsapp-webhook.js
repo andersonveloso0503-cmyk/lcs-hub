@@ -653,8 +653,22 @@ async function handlePossibleHumanIntervention({ db, phone, messageId, messageTi
   const stateRef = doc(db, "bot_state", phone);
   const stateSnap = await getDoc(stateRef);
 
-  // O bot nunca interagiu com esse contato — não há nada pra pausar.
-  if (!stateSnap.exists()) return;
+  // Se não existe nenhum estado ainda, é porque a LCS está iniciando a
+  // conversa com esse número pela primeira vez. Criamos já como pausado —
+  // o bot não vai entrar nesse atendimento a não ser que alguém mande "menu".
+  if (!stateSnap.exists()) {
+    await setDoc(stateRef, {
+      menu: "main",
+      step: 0,
+      data: {},
+      paused: true,
+      pausedReason: "conversa_iniciada_pela_lcs",
+      lastBotSentAt: 0,
+      lastBotMessageIds: [],
+      updatedAt: serverTimestamp(),
+    });
+    return;
+  }
 
   const state = stateSnap.data();
   const sentIds = state.lastBotMessageIds || [];
