@@ -1,22 +1,29 @@
 // /api/auto-week.js
 //
-// Cron que roda todo dia às 10h UTC (07h Brasília) e verifica se é hora de
-// preparar a próxima semana de posts. A lógica é:
-//   - Busca no Firestore o post agendado com a data mais distante no futuro
-//   - Se essa data estiver a 1 dia ou menos de hoje, gera a semana nova
-//   - Se não houver nenhum post agendado, também gera
+// Cron que roda todo dia às 10h UTC (07h Brasília) e faz DUAS coisas
+// independentes (pra não precisar de um segundo arquivo em api/, já que o
+// plano Hobby da Vercel limita a 12 Serverless Functions):
 //
-// Ao gerar, salva os posts com status "aguardando_aprovacao" no Firestore —
-// NÃO agenda no Buffer ainda. O responsável vê no painel (ApprovalQueue),
-// edita o que quiser e clica em "Aprovar". Só aí vai pro Buffer.
+// 1) INSTAGRAM — verifica se é hora de preparar a próxima semana de posts:
+//      - Busca o post agendado com a data mais distante no futuro
+//      - Se essa data estiver a 1 dia ou menos de hoje (ou não houver
+//        nenhum post agendado), gera 7 legendas + 7 criativos via IA e
+//        salva como "aguardando_aprovacao" (não agenda no Buffer ainda)
+//
+// 2) FOLLOW-UP — verifica contatos do CRM com follow-up atrasado (regras em
+//      src/crm/followUp.js: Lead 2 dias, Proposta 3 dias, Contrato 7 dias)
+//      e manda uma mensagem automática de WhatsApp. Pra não ficar
+//      insistindo pra sempre com quem nunca responde, para depois de
+//      MAX_AUTO_FOLLOWUPS tentativas e deixa aparecer na lista de
+//      "Follow-up pendente" da Home pra alguém decidir na mão.
 //
 // Segurança: a Vercel envia Authorization: Bearer {CRON_SECRET}. Qualquer
 // chamada sem esse header recebe 401.
 //
-// CUSTO por execução:
+// CUSTO por execução (quando gera a semana do Instagram):
 //   - 7 imagens OpenAI quality "medium": ~$0.21–0.35 (~R$1,20)
 //   - Claude Haiku (legendas): centavos
-//   Total: ~R$1,50/semana, ~R$6/mês
+//   Total: ~R$1,50/semana, ~R$6/mês. O follow-up não tem custo de IA.
 
 import { initializeApp, getApps } from "firebase/app";
 import {
@@ -29,8 +36,13 @@ import {
   orderBy,
   limit,
   serverTimestamp,
+  doc,
+  setDoc,
+  updateDoc,
+  increment,
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
+import { needsFollowUp, buildFollowUpMessage } from "../src/crm/followUp.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
@@ -252,6 +264,85 @@ async function uploadToBlob(base64, filename) {
   return blob.url;
 }
 
+// ── Follow-up automático ──────────────────────────────────────────────────────
+
+const EVOLUTION_BASE_URL =
+  process.env.EVOLUTION_BASE_URL ||
+  "https://evolution-api-production-7c15.up.railway.app";
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "lcs_crm";
+const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || "";
+
+// Quantas vezes o cron pode mandar follow-up automático pro mesmo contato
+// antes de desistir e deixar pra alguém decidir na mão (ver Home do site).
+const MAX_AUTO_FOLLOWUPS = 3;
+
+function normalizePhoneForFollowUp(raw) {
+  let digits = (raw || "").toString().replace(/\D/g, "");
+  if (digits.startsWith("0")) digits = digits.slice(1);
+  if (!digits.startsWith("55")) digits = "55" + digits;
+  return digits;
+}
+
+async function sendFollowUpWhatsApp(phone, text) {
+  const number = normalizePhoneForFollowUp(phone);
+  const res = await fetch(`${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+    body: JSON.stringify({ number, text }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.message || "Erro ao enviar via Evolution API");
+  return data;
+}
+
+/**
+ * Verifica todos os contatos do CRM e manda follow-up automático pra quem
+ * estiver atrasado, respeitando o limite de MAX_AUTO_FOLLOWUPS por contato.
+ * Reaproveita as mesmas regras (FOLLOWUP_RULES) usadas no botão manual da
+ * Home — assim o comportamento automático e o manual ficam sempre iguais.
+ */
+async function runFollowUpCheck(db) {
+  const snap = await getDocs(collection(db, "contacts"));
+  const contacts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+  const pending = contacts.filter((c) => {
+    if ((c.autoFollowUpCount || 0) >= MAX_AUTO_FOLLOWUPS) return false;
+    return needsFollowUp(c);
+  });
+
+  console.log(`[auto-week/followup] ${pending.length} contato(s) com follow-up pendente.`);
+
+  const results = [];
+  for (const contact of pending) {
+    try {
+      const message = buildFollowUpMessage(contact);
+      await sendFollowUpWhatsApp(contact.whatsapp, message);
+
+      await updateDoc(doc(db, "contacts", contact.id), {
+        lastContactAt: serverTimestamp(),
+        autoFollowUpCount: increment(1),
+      });
+
+      // Marca que foi o próprio sistema que mandou essa mensagem, pra o
+      // webhook não confundir o eco dela com um atendente humano e pausar
+      // o agente de IA desse contato sem necessidade.
+      await setDoc(
+        doc(db, "bot_state", contact.whatsapp),
+        { lastBotSentAt: Date.now() },
+        { merge: true }
+      );
+
+      results.push({ id: contact.id, name: contact.name || contact.whatsapp, ok: true });
+      console.log(`[auto-week/followup] ✅ ${contact.name || contact.whatsapp}`);
+    } catch (err) {
+      results.push({ id: contact.id, ok: false, error: err.message });
+      console.error(`[auto-week/followup] ❌ ${contact.name || contact.whatsapp}: ${err.message}`);
+    }
+  }
+
+  return results;
+}
+
 // ── Handler principal ─────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
@@ -265,19 +356,38 @@ export default async function handler(req, res) {
   }
 
   const db = getDb();
+  const response = { ok: true };
 
   try {
-    // Verifica se é hora de gerar
-    const { should, reason } = await shouldGenerate(db);
-    console.log(`[auto-week] Verificação: ${reason}`);
+    // 1) Follow-up — roda sempre, independente do que acontecer com o Instagram
+    try {
+      const followUpResults = await runFollowUpCheck(db);
+      response.followUp = {
+        sent: followUpResults.filter((r) => r.ok).length,
+        results: followUpResults,
+      };
+    } catch (followUpErr) {
+      console.error("[auto-week/followup] Erro fatal:", followUpErr);
+      response.followUp = { error: followUpErr.message };
+    }
 
-    if (!should) {
-      return res.status(200).json({ ok: true, skipped: true, reason });
+    // 2) Instagram — verifica se é hora de gerar (pode ser ignorado com ?force=true)
+    const force = req.query?.force === "true";
+
+    if (!force) {
+      const { should, reason } = await shouldGenerate(db);
+      console.log(`[auto-week] Verificação: ${reason}`);
+      if (!should) {
+        response.instagram = { skipped: true, reason };
+        return res.status(200).json(response);
+      }
+    } else {
+      console.log("[auto-week] Modo forçado — pulando verificação de prazo.");
     }
 
     console.log("[auto-week] Iniciando geração...");
     const monday = getNextMonday();
-    const results = [];
+    const igResults = [];
 
     // Gera legendas
     const posts = await generateCaptions();
@@ -309,19 +419,20 @@ export default async function handler(req, res) {
           createdAt: serverTimestamp(),
         });
 
-        results.push({ day: post.day, ok: true });
+        igResults.push({ day: post.day, ok: true });
         console.log(`[auto-week] ✅ ${post.day} salvo.`);
       } catch (err) {
         console.error(`[auto-week] ❌ ${post.day}: ${err.message}`);
-        results.push({ day: post.day, ok: false, error: err.message });
+        igResults.push({ day: post.day, ok: false, error: err.message });
       }
     }
 
-    const ok = results.filter((r) => r.ok).length;
+    const ok = igResults.filter((r) => r.ok).length;
     console.log(`[auto-week] Concluído — ${ok}/${posts.length} posts aguardando aprovação.`);
-    return res.status(200).json({ ok: true, results });
+    response.instagram = { results: igResults };
+    return res.status(200).json(response);
   } catch (err) {
     console.error("[auto-week] Erro fatal:", err);
-    return res.status(500).json({ ok: false, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message, partial: response });
   }
 }
