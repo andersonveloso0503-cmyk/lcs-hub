@@ -17,6 +17,7 @@ export function useGoogleAdsSnapshot() {
   const [campaigns, setCampaigns] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [hasMetrics, setHasMetrics] = useState(false);
+  const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -30,10 +31,12 @@ export function useGoogleAdsSnapshot() {
           setCampaigns(data.campaigns || []);
           setLastUpdated(data.updatedAt || null);
           setHasMetrics(Boolean(data.hasMetrics));
+          setAlerts(data.alerts || []);
         } else {
           setCampaigns([]);
           setLastUpdated(null);
           setHasMetrics(false);
+          setAlerts([]);
         }
         setLoading(false);
       },
@@ -45,7 +48,7 @@ export function useGoogleAdsSnapshot() {
     return () => unsub();
   }, []);
 
-  return { campaigns, lastUpdated, hasMetrics, loading, error };
+  return { campaigns, lastUpdated, hasMetrics, alerts, loading, error };
 }
 
 /**
