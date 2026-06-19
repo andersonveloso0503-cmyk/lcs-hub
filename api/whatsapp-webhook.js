@@ -678,6 +678,21 @@ async function handlePossibleHumanIntervention({ db, phone, messageId, messageTi
   const isBotEcho = (messageId && sentIds.includes(messageId)) || withinEchoWindow;
   if (isBotEcho) return;
 
+  // Mensagem humana de verdade — reseta o relógio do follow-up automático
+  // desse contato (acabou de ser atendido, não está mais atrasado) e zera
+  // o contador de tentativas automáticas, já que agora é um humano cuidando.
+  try {
+    const contact = await findContactByPhone(db, phone);
+    if (contact) {
+      await updateDoc(doc(db, "contacts", contact.id), {
+        lastContactAt: serverTimestamp(),
+        autoFollowUpCount: 0,
+      });
+    }
+  } catch (followUpResetErr) {
+    console.error("Erro ao resetar follow-up após intervenção humana:", followUpResetErr);
+  }
+
   if (!state.paused) {
     await setDoc(stateRef, {
       ...state,
