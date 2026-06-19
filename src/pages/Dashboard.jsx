@@ -1,12 +1,24 @@
-import { Users, Search, AlertCircle, MessageCircle } from "lucide-react";
+import { Users, AlertCircle, MessageCircle, Sparkles, Megaphone, Clock } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useContacts } from "../crm/useContacts";
 import { getPendingFollowUps } from "../crm/followUp";
 import { useWhatsAppMessages } from "../crm/useWhatsAppMessages";
+import { usePosts } from "../instagram/usePosts";
+import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
+
+function isWithinNext7Days(isoDate) {
+  if (!isoDate) return false;
+  const date = new Date(isoDate);
+  const now = new Date();
+  const in7Days = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  return date >= now && date <= in7Days;
+}
 
 export default function Dashboard() {
   const { contacts, loading, error } = useContacts();
   const { conversations } = useWhatsAppMessages();
+  const { posts } = usePosts();
+  const { campaigns, alerts: googleAdsAlerts, loading: gadsLoading } = useGoogleAdsSnapshot();
 
   const pendingFollowUps = getPendingFollowUps(contacts);
   const byStatus = {
@@ -15,6 +27,16 @@ export default function Dashboard() {
     contrato: contacts.filter((c) => c.status === "contrato").length,
     cliente: contacts.filter((c) => c.status === "cliente").length,
   };
+
+  // Instagram: posts agendados pra próxima semana + aguardando aprovação
+  const scheduledThisWeek = posts.filter(
+    (p) => p.status === "agendado" && isWithinNext7Days(p.scheduledAt)
+  ).length;
+  const pendingApproval = posts.filter((p) => p.status === "aguardando_aprovacao").length;
+
+  // Google Ads: campanhas ativas + orçamento
+  const activeCampaigns = campaigns.filter((c) => c.status === "ENABLED");
+  const activeBudgetTotal = activeCampaigns.reduce((sum, c) => sum + (c.budget_amount || 0), 0);
 
   return (
     <div>
@@ -38,6 +60,22 @@ export default function Dashboard() {
         </div>
       )}
 
+      {googleAdsAlerts && googleAdsAlerts.length > 0 && (
+        <div className="pending-metrics-note" style={{ borderColor: "var(--pink)", background: "#FFF0F6" }}>
+          <Megaphone size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--pink)" }} />
+          <span>
+            <strong>Alertas do Google Ads:</strong>
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {googleAdsAlerts.map((a, i) => (
+                <li key={i}>{a}</li>
+              ))}
+            </ul>
+            <Link to="/google-ads" style={{ fontSize: 13 }}>Ver detalhes →</Link>
+          </span>
+        </div>
+      )}
+
+      {/* CRM */}
       <div className="stat-grid">
         <StatCard
           to="/crm"
@@ -60,13 +98,32 @@ export default function Dashboard() {
           value={conversations.length}
           accent="pink"
         />
+      </div>
+
+      {/* Instagram + Google Ads */}
+      <div className="stat-grid">
         <StatCard
           to="/instagram"
-          icon={Search}
-          label="Instagram"
-          value="Abrir"
+          icon={Clock}
+          label="Posts aguardando aprovação"
+          value={pendingApproval}
+          accent={pendingApproval > 0 ? "pink" : "teal"}
+          note={pendingApproval > 0 ? "revisar agora" : "tudo em dia"}
+        />
+        <StatCard
+          to="/instagram"
+          icon={Sparkles}
+          label="Posts agendados (7 dias)"
+          value={scheduledThisWeek}
           accent="amber"
-          note="legendas, fotos e Buffer"
+        />
+        <StatCard
+          to="/google-ads"
+          icon={Megaphone}
+          label="Campanhas ativas"
+          value={gadsLoading ? "—" : activeCampaigns.length}
+          accent="blue"
+          note={gadsLoading ? undefined : `R$ ${activeBudgetTotal.toFixed(2)}/dia`}
         />
       </div>
 
@@ -82,6 +139,22 @@ export default function Dashboard() {
           Ver pipeline completo →
         </Link>
       </div>
+
+      {pendingApproval > 0 && (
+        <div className="card">
+          <h3 className="card-title">
+            <Clock size={15} style={{ marginRight: 6, verticalAlign: "-2px" }} />
+            Instagram — aguardando sua aprovação
+          </h3>
+          <p className="muted">
+            {pendingApproval} post{pendingApproval > 1 ? "s" : ""} gerados automaticamente,
+            esperando revisão antes de agendar no Buffer.
+          </p>
+          <Link to="/instagram" className="btn btn-ig btn-sm" style={{ marginTop: 14 }}>
+            Revisar agora →
+          </Link>
+        </div>
+      )}
 
       {pendingFollowUps.length > 0 && (
         <div className="card">
@@ -105,9 +178,9 @@ export default function Dashboard() {
       <div className="card">
         <h3 className="card-title">Módulos disponíveis</h3>
         <ul className="roadmap-list">
-          <li><strong>CRM</strong> — pipeline, WhatsApp (texto e áudio), follow-up automático</li>
-          <li><strong>Instagram</strong> — legendas com IA, editor de fotos, semana automática, Buffer (Instagram + Facebook)</li>
-          <li><strong>Google Ads</strong> — estrutura real das campanhas (32 campanhas, conta 3371725537); métricas e LCS Score pendentes de aprovação da API oficial</li>
+          <li><strong>CRM</strong> — pipeline, WhatsApp (texto e áudio), follow-up automático, agente de IA</li>
+          <li><strong>Instagram</strong> — legendas e criativos com IA, semana automática com fila de aprovação, Buffer</li>
+          <li><strong>Google Ads</strong> — estrutura real das campanhas (conta 3371725537), alertas de status e orçamento</li>
         </ul>
       </div>
     </div>
