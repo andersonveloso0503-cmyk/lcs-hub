@@ -22,7 +22,7 @@ const TYPE_LABELS = {
 };
 
 export default function GoogleAdsModule() {
-  const { campaigns, lastUpdated, hasMetrics, loading, error } = useGoogleAdsSnapshot();
+  const { campaigns, lastUpdated, hasMetrics, alerts, loading, error } = useGoogleAdsSnapshot();
   const [showAll, setShowAll] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
 
@@ -52,6 +52,20 @@ export default function GoogleAdsModule() {
         <div className="card error-card">
           <strong>Não foi possível conectar ao Firebase.</strong>
           <p>{error}</p>
+        </div>
+      )}
+
+      {alerts && alerts.length > 0 && (
+        <div className="pending-metrics-note" style={{ borderColor: "var(--pink)", background: "#FFF0F6" }}>
+          <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--pink)" }} />
+          <span>
+            <strong>Alertas da última atualização:</strong>
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {alerts.map((a, i) => (
+                <li key={i}>{a}</li>
+              ))}
+            </ul>
+          </span>
         </div>
       )}
 
