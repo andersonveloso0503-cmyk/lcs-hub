@@ -36,7 +36,6 @@ import {
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
 import { detectStatusFromMessage, canAutoReclassify } from "./lib/classifyMessage.js";
-import Groq from "groq-sdk";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
@@ -100,7 +99,8 @@ function getDb() {
 // Functions do plano Hobby. Chamado via action: "generate_blog_post" no
 // próprio handler deste webhook.
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// (Groq é chamado via fetch direto na API REST — sem dependência de SDK,
+// pra não precisar instalar pacote novo nem adicionar nada ao package.json)
 
 const BLOG_TEMPLATE_HTML = `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -219,13 +219,27 @@ Responda SOMENTE com um JSON válido, sem nenhum texto antes ou depois, no forma
   "bodyHtml": "o corpo do post em HTML, conforme as regras acima"
 }`;
 
-  const completion = await groq.chat.completions.create({
-    model: "llama-3.1-8b-instant",
-    messages: [{ role: "user", content: prompt }],
-    temperature: 0.7,
-    max_tokens: 2000,
+  const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "llama-3.1-8b-instant",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+      max_tokens: 2000,
+    }),
   });
 
+  if (!groqResponse.ok) {
+    const errBody = await groqResponse.text();
+    console.error("Erro na chamada à Groq (blog):", groqResponse.status, errBody);
+    throw new Error("Falha ao chamar a IA (Groq). Verifique a GROQ_API_KEY.");
+  }
+
+  const completion = await groqResponse.json();
   const textoResposta = completion.choices?.[0]?.message?.content || "";
 
   let parsed;
