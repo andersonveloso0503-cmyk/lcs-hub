@@ -70,10 +70,26 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
           setAiProgress(null);
           return;
         }
+
+        // Carrossel (2 imagens) pra posts de feed — Stories fica só com 1,
+        // já que não dá pra ter swipe de várias imagens numa story só.
+        const images = [creative.imageBase64];
+        if (p.format !== "stories") {
+          const detailTaglines = ["Qualidade Garantida", "Equipe Treinada", "Confiança e Profissionalismo", "Atendimento Personalizado"];
+          const detailHeadline = detailTaglines[Math.floor(Math.random() * detailTaglines.length)];
+          const creative2 = await generateCreativeAI({
+            service: aiKey,
+            headline: detailHeadline,
+            format: p.format,
+          });
+          if (creative2.ok) images.push(creative2.imageBase64);
+        }
+
         postsBuilt.push({
           ...p,
           photoId: null,
-          photoUrl: creative.imageBase64, // base64 — vai precisar de upload antes de agendar
+          photoUrl: images[0], // capa, usada na pré-visualização
+          photoUrls: images, // array completo, usado na hora de agendar
           isBase64: true,
           isAdapted: false,
         });
@@ -131,20 +147,30 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
 
       // Se a imagem é base64 (criativo IA ou stories adaptado), precisa subir
       // pro Vercel Blob antes de enviar ao Buffer (que exige URL pública).
-      let finalImageUrl = post.photoUrl;
+      // Quando tem mais de uma imagem (carrossel), sobe todas.
+      const sourceUrls = post.photoUrls && post.photoUrls.length > 0 ? post.photoUrls : [post.photoUrl];
+      let finalImageUrls = sourceUrls;
+
       if (post.isBase64) {
-        const upload = await uploadImage(post.photoUrl, `week-post-${Date.now()}.png`);
-        if (!upload.ok) {
-          setError(`Erro no upload da foto de ${post.day}: ${upload.error}`);
-          continue;
+        finalImageUrls = [];
+        let uploadFailed = false;
+        for (let idx = 0; idx < sourceUrls.length; idx++) {
+          const upload = await uploadImage(sourceUrls[idx], `week-post-${Date.now()}-${idx}.png`);
+          if (!upload.ok) {
+            setError(`Erro no upload da foto de ${post.day}: ${upload.error}`);
+            uploadFailed = true;
+            break;
+          }
+          finalImageUrls.push(upload.url);
         }
-        finalImageUrl = upload.url;
+        if (uploadFailed) continue;
       }
 
       const result = await scheduleToBuffer({
         text: post.caption,
-        imageUrl: finalImageUrl,
+        imageUrls: finalImageUrls,
         scheduledAt: post.scheduledAt,
+        channels: ["instagram", "facebook"],
       });
 
       if (result.ok || result.partial) {
@@ -154,7 +180,8 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
         await onSavePost({
           service: post.service,
           caption: post.caption,
-          imageUrl: finalImageUrl,
+          imageUrl: finalImageUrls[0],
+          imageUrls: finalImageUrls,
           status: "agendado",
           scheduledAt: post.scheduledAt,
           bufferPostIds,
@@ -266,6 +293,21 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
                   <div className="week-card-no-photo">
                     <ImageIcon size={20} />
                   </div>
+                )}
+                {post.photoUrls && post.photoUrls.length > 1 && (
+                  <span style={{
+                    position: "absolute",
+                    top: 6,
+                    right: 6,
+                    background: "rgba(0,0,0,0.65)",
+                    color: "#fff",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    padding: "2px 7px",
+                    borderRadius: 5,
+                  }}>
+                    📷 {post.photoUrls.length} · carrossel
+                  </span>
                 )}
                 {imageSource === "temas" && themeBankPhotos.length > 1 && (
                   <button

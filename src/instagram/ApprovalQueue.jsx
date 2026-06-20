@@ -50,8 +50,9 @@ export default function ApprovalQueue({ posts, onUpdate, onDelete }) {
     try {
       const result = await scheduleToBuffer({
         text: post.caption,
-        imageUrl: post.imageUrl,
+        imageUrls: post.imageUrls && post.imageUrls.length > 0 ? post.imageUrls : [post.imageUrl],
         scheduledAt: post.scheduledAt,
+        channels: ["instagram", "facebook"],
       });
 
       if (!result.ok && !result.partial) {
@@ -86,8 +87,9 @@ export default function ApprovalQueue({ posts, onUpdate, onDelete }) {
       try {
         const result = await scheduleToBuffer({
           text: post.caption,
-          imageUrl: post.imageUrl,
+          imageUrls: post.imageUrls && post.imageUrls.length > 0 ? post.imageUrls : [post.imageUrl],
           scheduledAt: post.scheduledAt,
+          channels: ["instagram", "facebook"],
         });
 
         if (!result.ok && !result.partial) {
@@ -152,13 +154,28 @@ export default function ApprovalQueue({ posts, onUpdate, onDelete }) {
           >
             <div style={{ display: "flex", gap: 0 }}>
               {/* Miniatura da imagem */}
-              <div style={{ width: 120, minHeight: 120, flexShrink: 0, background: "var(--border)" }}>
+              <div style={{ width: 120, minHeight: 120, flexShrink: 0, background: "var(--border)", position: "relative" }}>
                 {post.imageUrl && (
                   <img
                     src={post.imageUrl}
                     alt={post.service}
                     style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                   />
+                )}
+                {post.imageUrls && post.imageUrls.length > 1 && (
+                  <span style={{
+                    position: "absolute",
+                    top: 4,
+                    right: 4,
+                    background: "rgba(0,0,0,0.65)",
+                    color: "#fff",
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: "2px 6px",
+                    borderRadius: 4,
+                  }}>
+                    📷 {post.imageUrls.length}
+                  </span>
                 )}
               </div>
 
