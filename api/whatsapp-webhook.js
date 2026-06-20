@@ -193,7 +193,54 @@ function formatarDataPtBr() {
 
 function extrairJsonDaResposta(textoBruto) {
   const limpo = textoBruto.replace(/```json|```/g, "").trim();
-  return JSON.parse(limpo);
+
+  // Tenta o parse direto primeiro (caso a IA já tenha retornado JSON válido)
+  try {
+    return JSON.parse(limpo);
+  } catch (_) {
+    // segue para a versão "corrigida" abaixo
+  }
+
+  // A IA às vezes devolve quebras de linha reais dentro dos valores das
+  // strings (ex: dentro de "bodyHtml"), o que invalida o JSON — JSON exige
+  // que isso seja escapado como \n. Aqui percorremos o texto caractere a
+  // caractere e escapamos quebras de linha que estejam DENTRO de uma
+  // string (entre aspas), preservando as que estão fora (formatação do
+  // próprio JSON, que são inofensivas).
+  let dentroDeString = false;
+  let escapeProximo = false;
+  let corrigido = "";
+
+  for (let i = 0; i < limpo.length; i++) {
+    const char = limpo[i];
+
+    if (escapeProximo) {
+      corrigido += char;
+      escapeProximo = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      corrigido += char;
+      escapeProximo = true;
+      continue;
+    }
+
+    if (char === '"') {
+      dentroDeString = !dentroDeString;
+      corrigido += char;
+      continue;
+    }
+
+    if (dentroDeString && (char === "\n" || char === "\r")) {
+      corrigido += "\\n";
+      continue;
+    }
+
+    corrigido += char;
+  }
+
+  return JSON.parse(corrigido);
 }
 
 async function gerarPostBlog(tema) {
@@ -212,7 +259,7 @@ Regras:
 - NÃO inclua <h1>, não inclua tags <html>/<body>, não inclua call-to-action de WhatsApp (isso já é adicionado automaticamente depois).
 - NÃO invente preços exatos em R$; fale em termos de fatores que influenciam o custo.
 
-Responda SOMENTE com um JSON válido, sem nenhum texto antes ou depois, no formato exato:
+Responda SOMENTE com um JSON válido, em uma única linha, sem nenhum texto antes ou depois e sem quebras de linha reais dentro dos valores (use \\n se precisar separar parágrafos dentro de bodyHtml), no formato exato:
 {
   "title": "título do post, até 60 caracteres, com a palavra-chave principal",
   "metaDescription": "resumo de até 155 caracteres, atrativo, com a palavra-chave principal",
