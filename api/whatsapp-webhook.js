@@ -36,6 +36,7 @@ import {
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
 import { detectStatusFromMessage, canAutoReclassify } from "./lib/classifyMessage.js";
+import { gerarPostBlog } from "./lib/blogGenerator.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
@@ -752,6 +753,28 @@ async function uploadMediaToBlob(base64, mimetype, extensionHint) {
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // --------------------------------------------------------------------
+  // ROTEAMENTO: geração de post de blog (LCS Hub → módulo de Conteúdo)
+  // Não tem relação com a Evolution API / WhatsApp. Usa o mesmo arquivo
+  // pra não estourar o limite de 12 Serverless Functions do plano Hobby.
+  // Chamada esperada do front-end:
+  //   fetch("/api/whatsapp-webhook", {
+  //     method: "POST",
+  //     headers: { "Content-Type": "application/json" },
+  //     body: JSON.stringify({ action: "generate_blog_post", tema: "..." }),
+  //   })
+  // --------------------------------------------------------------------
+  if (req.body?.action === "generate_blog_post") {
+    try {
+      const { tema } = req.body;
+      const post = await gerarPostBlog(tema);
+      return res.status(200).json(post);
+    } catch (err) {
+      console.error("Erro ao gerar post de blog:", err);
+      return res.status(500).json({ error: err.message || "Erro ao gerar post." });
+    }
   }
 
   try {
