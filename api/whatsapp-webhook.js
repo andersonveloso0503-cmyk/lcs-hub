@@ -61,22 +61,64 @@ const ESPECIALISTA_WHATSAPP = process.env.ESPECIALISTA_WHATSAPP || "555198502510
 
 /**
  * Monta a mensagem com todos os dados coletados no fluxo de orçamento, pra
- * mandar pro especialista assim que o cliente termina de responder.
+ * mandar pro especialista (Luís) assim que o cliente termina de responder.
+ * Formato em estilo "recibo": cabeçalho da empresa, divisórias e campos
+ * alinhados, fácil de ler rápido no WhatsApp.
  */
+function formatarTelefoneExibicao(raw) {
+  const digits = (raw || "").toString().replace(/\D/g, "");
+  // Espera formato 55DDXXXXXXXXX (13 dígitos, com 9 na frente do número)
+  if (digits.length === 13) {
+    const ddd = digits.slice(2, 4);
+    const parte1 = digits.slice(4, 9);
+    const parte2 = digits.slice(9);
+    return `(${ddd}) ${parte1}-${parte2}`;
+  }
+  if (digits.length === 12) {
+    const ddd = digits.slice(2, 4);
+    const parte1 = digits.slice(4, 8);
+    const parte2 = digits.slice(8);
+    return `(${ddd}) ${parte1}-${parte2}`;
+  }
+  return raw;
+}
+
+function formatarDataHoraPtBr() {
+  return new Date().toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "America/Sao_Paulo",
+  });
+}
+
 function buildEspecialistaMessage({ phone, pushName, data }) {
   const linhas = [
-    "📋 *Novo pedido de orçamento pelo WhatsApp*",
+    "🧾 *LCS TERCEIRIZAÇÃO*",
+    "_Novo Pedido de Orçamento_",
+    "━━━━━━━━━━━━━━━━━━━",
+    `🗓️ ${formatarDataHoraPtBr()}`,
     "",
-    `Cliente: ${pushName || "(sem nome)"}`,
-    `WhatsApp: ${phone}`,
-    `Serviço: ${data.servico}`,
+    "*👤 Cliente*",
+    pushName || "(sem nome)",
+    formatarTelefoneExibicao(phone),
+    "",
+    "*🧹 Serviço*",
+    data.servico,
   ];
 
   if (data.tipoPortaria) linhas.push(`Tipo de portaria: ${data.tipoPortaria}`);
-  linhas.push(`Carga horária desejada: ${data.cargaHoraria}`);
-  linhas.push(`Endereço: ${data.endereco}`);
-  linhas.push(`Visita técnica: ${data.visitaTecnica ? "Sim" : "Não"}`);
+  linhas.push(`Carga horária: ${data.cargaHoraria}`);
+
+  linhas.push("", "*📍 Endereço*", data.endereco);
+
+  linhas.push("", "*📋 Detalhes*");
+  linhas.push(`Visita técnica: ${data.visitaTecnica ? "Sim ✅" : "Não"}`);
   if (data.insalubridade) linhas.push(`Insalubridade: ${data.insalubridade}`);
+
+  linhas.push("━━━━━━━━━━━━━━━━━━━", "_Atendimento via bot WhatsApp_");
 
   return linhas.join("\n");
 }
@@ -798,6 +840,7 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
       step: 0,
       data: {},
       paused: false,
+      curriculoRecebido: true,
       lastBotSentAt: Date.now(),
       updatedAt: serverTimestamp(),
     });
@@ -805,6 +848,19 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
   }
 
   if (messageDoc.type !== "text") return;
+
+  // Currículo já recebido anteriormente: a pessoa escrevendo de novo (texto
+  // qualquer) recebe só o agradecimento de novo, sem reabrir o menu ou
+  // qualquer outro fluxo. Só "menu"/"voltar" tira a pessoa desse estado.
+  const wantsMenuAfterCurriculo = isMenuCommand(messageDoc.text);
+  if (state?.curriculoRecebido && !wantsMenuAfterCurriculo) {
+    await sendTextSequence(phone, [
+      "Já recebemos seu currículo! 🙌 Agradecemos o interesse em fazer parte da LCS — nossa equipe de RH " +
+        "vai analisar e entra em contato caso surja uma vaga compatível com seu perfil.",
+    ]);
+    await setDoc(stateRef, { lastBotSentAt: Date.now(), updatedAt: serverTimestamp() }, { merge: true });
+    return;
+  }
 
   const result = processMessage({ text: messageDoc.text, pushName, state });
 
