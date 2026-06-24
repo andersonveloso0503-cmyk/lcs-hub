@@ -21,9 +21,12 @@
 // chamada sem esse header recebe 401.
 //
 // CUSTO por execução (quando gera a semana do Instagram):
-//   - 7 imagens OpenAI quality "medium": ~$0.21–0.35 (~R$1,20)
-//   - Claude Haiku (legendas): centavos
-//   Total: ~R$1,50/semana, ~R$6/mês. O follow-up não tem custo de IA.
+//   - Provider de imagem ALTERNA por semana ISO (par = Gemini, ímpar = OpenAI):
+//       OpenAI: 7 imagens quality "medium" ~$0.21-0.35 (~R$1,20/semana)
+//       Gemini: 7 imagens Imagen 3 ~$0.03-0.05 cada (~R$1,00/semana, sem texto na imagem)
+//   - Claude Haiku (legendas): centavos, toda semana
+//   Total médio: ~R$1,10/semana, ~R$4,40/mês (metade do custo anterior de
+//   usar sempre OpenAI). O follow-up não tem custo de IA.
 
 import { initializeApp, getApps } from "firebase/app";
 import {
@@ -105,6 +108,26 @@ function getNextMonday() {
   next.setDate(today.getDate() + diff);
   next.setHours(0, 0, 0, 0);
   return next;
+}
+
+// Número da semana ISO do ano (1-52/53) — usado para alternar o provider de
+// imagem (OpenAI numa semana, Gemini na outra), sem precisar guardar estado
+// em nenhum lugar: a conta é sempre a mesma pra uma data dada.
+function getIsoWeekNumber(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+}
+
+// Alterna o provider de geração de imagem por semana: semanas pares usam
+// Gemini (mais barato), semanas ímpares usam OpenAI (texto mais preciso).
+// Baseado na semana de referência (segunda-feira que está sendo gerada),
+// não na data de hoje — assim fica estável mesmo se o cron rodar atrasado.
+function getProviderForWeek(monday) {
+  const week = getIsoWeekNumber(monday);
+  return week % 2 === 0 ? "gemini" : "openai";
 }
 
 function buildScheduledAt(dayName, suggestedTime, monday) {
@@ -214,7 +237,7 @@ Responda APENAS em JSON válido, sem markdown:
 
 // ── Step 2: Gera criativo via OpenAI ─────────────────────────────────────────
 
-async function generateCreative(service, format) {
+async function generateCreativeOpenAI(service, format) {
   const aiKey = SERVICE_TO_AI_KEY[service] || "Limpeza";
   const size = format === "stories" ? "1024x1536" : "1024x1024";
   const scene = SCENE_BY_SERVICE[aiKey] || SCENE_BY_SERVICE.Limpeza;
@@ -248,6 +271,41 @@ Style: polished, corporate, B2B marketing photo.`;
   const b64 = data?.data?.[0]?.b64_json;
   if (!b64) throw new Error(`OpenAI sem imagem para ${service}: ${JSON.stringify(data?.error)}`);
   return `data:image/png;base64,${b64}`;
+}
+
+async function generateCreativeGemini(service, format) {
+  const aiKey = SERVICE_TO_AI_KEY[service] || "Limpeza";
+  const aspectRatio = format === "stories" ? "9:16" : "1:1";
+  const scene = SCENE_BY_SERVICE[aiKey] || SCENE_BY_SERVICE.Limpeza;
+
+  // Gemini não escreve texto embutido com confiabilidade, então o prompt
+  // pede só a foto, sem cards de texto sobrepostos (diferente do OpenAI).
+  const imagePrompt = `Professional, modern Instagram marketing photo for a Brazilian facilities services company "LCS Terceirização" (cleaning, security/portaria, facilities and maintenance services for condominiums and businesses in Porto Alegre, Brazil).
+Service: ${aiKey}.
+A realistic, professional photo showing: ${scene}.
+Clean, professional, corporate aesthetic, high quality photo, suitable for a real business's social media. No text overlays.`;
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${process.env.GEMINI_API_KEY}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      instances: [{ prompt: imagePrompt }],
+      parameters: { sampleCount: 1, aspectRatio, personGeneration: "allow_adult", safetySetting: "block_only_high" },
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || data?.error) throw new Error(`Gemini sem imagem para ${service}: ${data?.error?.message || res.status}`);
+  const b64 = data?.predictions?.[0]?.bytesBase64Encoded;
+  if (!b64) throw new Error(`Gemini sem imagem para ${service}: resposta sem bytesBase64Encoded`);
+  return `data:image/png;base64,${b64}`;
+}
+
+async function generateCreative(service, format, provider) {
+  return provider === "gemini"
+    ? generateCreativeGemini(service, format)
+    : generateCreativeOpenAI(service, format);
 }
 
 // ── Step 3: Upload pro Vercel Blob ────────────────────────────────────────────
@@ -387,6 +445,8 @@ export default async function handler(req, res) {
 
     console.log("[auto-week] Iniciando geração...");
     const monday = getNextMonday();
+    const provider = getProviderForWeek(monday);
+    console.log(`[auto-week] Provider de imagem desta semana: ${provider} (semana ISO ${getIsoWeekNumber(monday)})`);
     const igResults = [];
 
     // Gera legendas
@@ -399,8 +459,8 @@ export default async function handler(req, res) {
       const scheduledAt = buildScheduledAt(post.day, post.suggestedTime, monday);
 
       try {
-        console.log(`[auto-week] Criativo ${i + 1}/${posts.length}: ${post.day}`);
-        const base64 = await generateCreative(post.service, post.format);
+        console.log(`[auto-week] Criativo ${i + 1}/${posts.length} (${provider}): ${post.day}`);
+        const base64 = await generateCreative(post.service, post.format, provider);
         const filename = `auto-week-${monday.toISOString().slice(0, 10)}-${i + 1}.png`;
         const imageUrl = await uploadToBlob(base64, filename);
 
@@ -415,6 +475,7 @@ export default async function handler(req, res) {
           day: post.day,
           bufferPostIds: [],
           imageSource: "ia",
+          aiProvider: provider,
           autoGenerated: true,
           createdAt: serverTimestamp(),
         });
