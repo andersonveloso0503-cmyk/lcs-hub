@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Sparkles, Send, Calendar, Copy, Image as ImageIcon } from "lucide-react";
-import { generateCaption, scheduleToBuffer } from "./api";
+import { Sparkles, Send, Calendar, Copy, Image as ImageIcon, RefreshCw } from "lucide-react";
+import { generateCaption, scheduleToBuffer, generateCreativeAI, uploadImage } from "./api";
 
 const SERVICE_OPTIONS = [
   "Limpeza e Conservação",
@@ -26,6 +26,16 @@ const GOAL_OPTIONS = [
   "Antes e depois / Resultados",
 ];
 
+// Mapeamento pro generate-creative-ai.js, igual ao usado no WeeklyPlanner.
+const SERVICE_TO_AI_KEY = {
+  "Limpeza e Conservação": "Limpeza",
+  "Portaria e Recepção": "Portaria",
+  "Facilities e Manutenção": "Facilities",
+  "Condomínios e Síndicos": "Condomínios",
+  "Empresas / Escritórios": "Empresas",
+  "Apresentação Geral LCS": "Limpeza",
+};
+
 export default function PostGenerator({ themeBankPhotos, onSavePost }) {
   const [service, setService] = useState(SERVICE_OPTIONS[0]);
   const [tone, setTone] = useState(TONE_OPTIONS[0]);
@@ -40,6 +50,13 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
   const [showAllPhotos, setShowAllPhotos] = useState(false);
+
+  // Comparação de criativos IA: gera um de cada provider lado a lado, pra
+  // ver a qualidade antes de decidir qual usar no automático (auto-week.js).
+  const [aiPreview, setAiPreview] = useState({ openai: null, gemini: null });
+  const [aiPreviewLoading, setAiPreviewLoading] = useState({ openai: false, gemini: false });
+  const [aiPreviewError, setAiPreviewError] = useState({ openai: "", gemini: "" });
+  const [selectedAiProvider, setSelectedAiProvider] = useState(null); // "openai" | "gemini" | null
 
   const matchingPhotos = themeBankPhotos.filter((p) =>
     service.toLowerCase().includes(p.service?.toLowerCase().split(" ")[0] || "zzz")
@@ -63,20 +80,58 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
     navigator.clipboard.writeText(caption);
   }
 
+  async function handleGenerateAiPreview(provider) {
+    setAiPreviewLoading((prev) => ({ ...prev, [provider]: true }));
+    setAiPreviewError((prev) => ({ ...prev, [provider]: "" }));
+    const aiKey = SERVICE_TO_AI_KEY[service] || "Limpeza";
+    const result = await generateCreativeAI({ service: aiKey, headline: aiKey, format: "post", provider });
+    if (result.ok) {
+      setAiPreview((prev) => ({ ...prev, [provider]: result.imageBase64 }));
+    } else {
+      setAiPreviewError((prev) => ({ ...prev, [provider]: result.error }));
+    }
+    setAiPreviewLoading((prev) => ({ ...prev, [provider]: false }));
+  }
+
+  function handleGenerateBothPreviews() {
+    handleGenerateAiPreview("openai");
+    handleGenerateAiPreview("gemini");
+  }
+
+  function selectAiPhoto(provider) {
+    setSelectedAiProvider(provider);
+    setSelectedPhotoId(null); // desmarca foto do Banco de Temas, se tinha uma
+  }
+
   async function handleSendToBuffer() {
-    if (!caption || !selectedPhoto) {
-      setError("Gere a legenda e selecione uma foto do Banco de Temas antes de enviar.");
+    const usingAiImage = selectedAiProvider && aiPreview[selectedAiProvider];
+    if (!caption || (!selectedPhoto && !usingAiImage)) {
+      setError("Gere a legenda e escolha uma imagem (Banco de Temas ou criativo IA) antes de enviar.");
       return;
     }
     setSending(true);
     setError("");
     setSendResult(null);
 
-    // A foto do Banco de Temas já é uma URL pública do Vercel Blob — não
-    // precisa de upload novamente.
+    let imageUrl = selectedPhoto?.imageUrl || null;
+    let imageSource = "temas";
+
+    if (usingAiImage) {
+      // Imagem da IA vem em base64 — precisa subir pro Blob antes, já que o
+      // Buffer exige uma URL pública.
+      const upload = await uploadImage(aiPreview[selectedAiProvider], `post-${Date.now()}.png`);
+      if (!upload.ok) {
+        setError("Erro no upload da imagem: " + upload.error);
+        setSending(false);
+        return;
+      }
+      imageUrl = upload.url;
+      imageSource = selectedAiProvider; // "openai" ou "gemini"
+    }
+
     const result = await scheduleToBuffer({
       text: caption,
-      imageUrl: selectedPhoto.imageUrl,
+      imageUrl,
       scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : null,
     });
 
@@ -94,10 +149,11 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
       await onSavePost({
         service,
         caption,
-        imageUrl: selectedPhoto.imageUrl,
+        imageUrl,
         status: scheduledAt ? "agendado" : "publicado",
         scheduledAt: scheduledAt || null,
         bufferPostIds,
+        imageSource,
       });
     } else {
       setError("Erro ao agendar no Buffer: " + result.error);
@@ -106,10 +162,11 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
   }
 
   async function handleSaveDraft() {
+    const usingAiImage = selectedAiProvider && aiPreview[selectedAiProvider];
     await onSavePost({
       service,
       caption,
-      imageUrl: selectedPhoto?.imageUrl || null,
+      imageUrl: selectedPhoto?.imageUrl || (usingAiImage ? aiPreview[selectedAiProvider] : null),
       status: "rascunho",
     });
     setSendResult({ ok: true, draft: true });
@@ -201,9 +258,89 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
             className="card-title"
             style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
           >
+            <span>🆚 Comparar criativo gerado por IA (opcional)</span>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={handleGenerateBothPreviews}
+              disabled={aiPreviewLoading.openai || aiPreviewLoading.gemini}
+            >
+              <RefreshCw size={13} /> Gerar dos dois
+            </button>
+          </div>
+          <p className="muted" style={{ marginBottom: 14 }}>
+            Gera uma imagem de teste em cada provider pra você comparar qualidade antes de
+            escolher. Isso é só uma prévia — não agenda nada ainda.
+          </p>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            {/* OpenAI */}
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <strong style={{ fontSize: 13 }}>🎨 OpenAI</strong>
+                <button className="btn btn-outline btn-sm" onClick={() => handleGenerateAiPreview("openai")} disabled={aiPreviewLoading.openai}>
+                  <RefreshCw size={12} className={aiPreviewLoading.openai ? "spin" : ""} />
+                </button>
+              </div>
+              <div
+                className={"photo-card" + (selectedAiProvider === "openai" ? " selected" : "")}
+                style={{ minHeight: 160, display: "flex", alignItems: "center", justifyContent: "center", cursor: aiPreview.openai ? "pointer" : "default" }}
+                onClick={() => aiPreview.openai && selectAiPhoto("openai")}
+              >
+                {aiPreviewLoading.openai ? (
+                  <RefreshCw size={20} className="spin" />
+                ) : aiPreview.openai ? (
+                  <img src={aiPreview.openai} alt="Criativo OpenAI" style={{ width: "100%" }} />
+                ) : (
+                  <ImageIcon size={20} className="muted" />
+                )}
+              </div>
+              {aiPreviewError.openai && <div className="chat-error" style={{ marginTop: 6, fontSize: 11 }}>{aiPreviewError.openai}</div>}
+              <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>~$0.03–0.05/img · texto na imagem mais preciso</p>
+            </div>
+
+            {/* Gemini */}
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <strong style={{ fontSize: 13 }}>✨ Gemini</strong>
+                <button className="btn btn-outline btn-sm" onClick={() => handleGenerateAiPreview("gemini")} disabled={aiPreviewLoading.gemini}>
+                  <RefreshCw size={12} className={aiPreviewLoading.gemini ? "spin" : ""} />
+                </button>
+              </div>
+              <div
+                className={"photo-card" + (selectedAiProvider === "gemini" ? " selected" : "")}
+                style={{ minHeight: 160, display: "flex", alignItems: "center", justifyContent: "center", cursor: aiPreview.gemini ? "pointer" : "default" }}
+                onClick={() => aiPreview.gemini && selectAiPhoto("gemini")}
+              >
+                {aiPreviewLoading.gemini ? (
+                  <RefreshCw size={20} className="spin" />
+                ) : aiPreview.gemini ? (
+                  <img src={aiPreview.gemini} alt="Criativo Gemini" style={{ width: "100%" }} />
+                ) : (
+                  <ImageIcon size={20} className="muted" />
+                )}
+              </div>
+              {aiPreviewError.gemini && <div className="chat-error" style={{ marginTop: 6, fontSize: 11 }}>{aiPreviewError.gemini}</div>}
+              <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>custo bem menor · sem texto embutido na imagem</p>
+            </div>
+          </div>
+
+          {selectedAiProvider && (
+            <div className="followup-empty" style={{ marginTop: 12 }}>
+              ✅ Criativo {selectedAiProvider === "openai" ? "OpenAI" : "Gemini"} selecionado para este post.
+            </div>
+          )}
+        </div>
+      )}
+
+      {caption && !generating && (
+        <div className="card">
+          <div
+            className="card-title"
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
+          >
             <span>
               <ImageIcon size={15} style={{ marginRight: 6, verticalAlign: "-2px" }} />
-              Escolha uma foto do Banco de Temas
+              Ou escolha uma foto do Banco de Temas
             </span>
             {matchingPhotos.length > 0 && matchingPhotos.length < themeBankPhotos.length && (
               <button
@@ -226,7 +363,7 @@ export default function PostGenerator({ themeBankPhotos, onSavePost }) {
                 <div
                   key={p.id}
                   className={"photo-card selectable" + (selectedPhotoId === p.id ? " selected" : "")}
-                  onClick={() => setSelectedPhotoId(p.id)}
+                  onClick={() => { setSelectedPhotoId(p.id); setSelectedAiProvider(null); }}
                 >
                   <img src={p.imageUrl} alt={p.service} />
                 </div>
