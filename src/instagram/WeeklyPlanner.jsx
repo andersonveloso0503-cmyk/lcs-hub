@@ -19,6 +19,7 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
   const [posts, setPosts] = useState([]);
   const [generating, setGenerating] = useState(false);
   const [imageSource, setImageSource] = useState("temas"); // "temas" | "ia"
+  const [aiProvider, setAiProvider] = useState("openai"); // "openai" | "gemini"
   const [aiProgress, setAiProgress] = useState(null); // null | { current, total }
   const [error, setError] = useState("");
   const [sendingAll, setSendingAll] = useState(false);
@@ -63,7 +64,7 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
         setAiProgress({ current: i + 1, total: withDates.length });
         const aiKey = SERVICE_TO_AI_KEY[p.service] || "Limpeza";
         const headline = p.service.split(" ")[0]; // ex: "Limpeza", "Portaria"
-        const creative = await generateCreativeAI({ service: aiKey, headline, format: p.format });
+        const creative = await generateCreativeAI({ service: aiKey, headline, format: p.format, provider: aiProvider });
         if (!creative.ok) {
           setError(`Erro ao gerar criativo de ${p.day}: ${creative.error}`);
           setGenerating(false);
@@ -81,6 +82,7 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
             service: aiKey,
             headline: detailHeadline,
             format: p.format,
+            provider: aiProvider,
           });
           if (creative2.ok) images.push(creative2.imageBase64);
         }
@@ -243,10 +245,32 @@ export default function WeeklyPlanner({ themeBankPhotos, onSavePost }) {
         )}
 
         {imageSource === "ia" && (
-          <div className="muted" style={{ marginBottom: 16, fontSize: 12 }}>
-            💡 A IA gera 7 imagens (~$0.03–0.05 cada). Revise os criativos antes de agendar —
-            a IA pode errar textos dentro da imagem.
-          </div>
+          <>
+            <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+              <button
+                className={"btn " + (aiProvider === "openai" ? "btn-ig" : "btn-secondary")}
+                onClick={() => setAiProvider("openai")}
+                style={{ flex: 1, fontSize: 12 }}
+              >
+                🎨 OpenAI (mais preciso no texto)
+              </button>
+              <button
+                className={"btn " + (aiProvider === "gemini" ? "btn-ig" : "btn-secondary")}
+                onClick={() => setAiProvider("gemini")}
+                style={{ flex: 1, fontSize: 12 }}
+              >
+                ✨ Gemini (mais barato)
+              </button>
+            </div>
+            <div className="muted" style={{ marginBottom: 16, fontSize: 12 }}>
+              {aiProvider === "openai" ? (
+                <>💡 OpenAI (gpt-image-1.5): ~$0.03–0.05/imagem, escreve textos dentro da imagem com mais precisão.</>
+              ) : (
+                <>💡 Gemini (Imagen 3): custo bem menor, mas sem texto embutido na imagem — fica só a foto, sem os cards de texto sobrepostos.</>
+              )}
+              {" "}A IA gera até 14 imagens na semana (2 por dia de feed). Revise os criativos antes de agendar.
+            </div>
+          </>
         )}
 
         <button
