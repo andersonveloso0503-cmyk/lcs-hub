@@ -14,13 +14,87 @@
 // trocar "quality" para "low" (~$0.01–0.02/imagem); para mais qualidade,
 // trocar para "high" (~$0.13–0.20/imagem).
 
+// Gera a imagem usando Gemini Imagen 3 (Google). Custo bem menor que OpenAI
+// (gratuito até certa cota, depois ~$0.03/imagem fixo, sem variação por
+// qualidade). Texto embutido na imagem é menos confiável que o GPT-Image,
+// então preferir esse provider quando a prioridade é custo, não precisão
+// do texto desenhado.
+async function generateWithGemini(prompt, size) {
+  const aspectRatio = size === "1024x1536" ? "9:16" : "1:1";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${process.env.GEMINI_API_KEY}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      instances: [{ prompt }],
+      parameters: {
+        sampleCount: 1,
+        aspectRatio,
+        personGeneration: "allow_adult",
+        safetySetting: "block_only_high",
+      },
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || data?.error) {
+    const message = data?.error?.message || `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+
+  const b64 = data?.predictions?.[0]?.bytesBase64Encoded;
+  if (!b64) throw new Error("Resposta sem imagem do Gemini");
+
+  return `data:image/png;base64,${b64}`;
+}
+
+async function generateWithOpenAI(prompt, size) {
+  const response = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-image-1.5",
+      prompt,
+      size,
+      quality: "medium",
+      n: 1,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    const rawMessage = data?.error?.message || "";
+    const isBillingError =
+      /billing|hard limit|quota|insufficient.*quota/i.test(rawMessage) ||
+      data?.error?.code === "billing_hard_limit_reached" ||
+      data?.error?.type === "insufficient_quota";
+
+    const friendlyMessage = isBillingError
+      ? "A conta da OpenAI está sem créditos ou atingiu o limite de gastos configurado. Acesse platform.openai.com → Settings → Billing, cadastre um cartão/créditos e confirme o limite de uso antes de tentar novamente."
+      : rawMessage || "Erro ao gerar imagem com IA";
+
+    throw new Error(friendlyMessage);
+  }
+
+  const b64 = data?.data?.[0]?.b64_json;
+  if (!b64) throw new Error("Resposta sem imagem da IA");
+
+  return `data:image/png;base64,${b64}`;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    const { service, headline, format } = req.body || {};
+    const { service, headline, format, provider } = req.body || {};
 
     if (!service) {
       return res.status(400).json({ error: "Campo 'service' é obrigatório" });
@@ -63,43 +137,25 @@ Design requirements:
 - Do not include any other text, watermarks, or logos besides what's specified above.
 - High quality, polished, suitable for a real business's social media.`;
 
-    const response = await fetch("https://api.openai.com/v1/images/generations", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-image-1.5",
-        prompt,
-        size,
-        quality: "medium",
-        n: 1,
-      }),
-    });
+    // Gemini não escreve texto embutido com confiabilidade — quando o
+    // provider escolhido é Gemini, simplifica o prompt removendo a exigência
+    // de texto exato nos cards (vira só elementos decorativos).
+    const promptForProvider =
+      provider === "gemini"
+        ? `Professional, modern Instagram marketing photo for a Brazilian facilities services company "LCS Terceirização" (cleaning, security/portaria, facilities and maintenance services for condominiums and businesses in Porto Alegre, Brazil).
 
-    const data = await response.json();
+Service being promoted: ${service}.
 
-    if (!response.ok) {
-      const rawMessage = data?.error?.message || "";
-      const isBillingError =
-        /billing|hard limit|quota|insufficient.*quota/i.test(rawMessage) ||
-        data?.error?.code === "billing_hard_limit_reached" ||
-        data?.error?.type === "insufficient_quota";
+A realistic, professional photo showing: ${sceneDescription}.
+Clean, professional, corporate aesthetic, high quality photo, suitable for a real business's social media. No text overlays.`
+        : prompt;
 
-      const friendlyMessage = isBillingError
-        ? "A conta da OpenAI está sem créditos ou atingiu o limite de gastos configurado. Acesse platform.openai.com → Settings → Billing, cadastre um cartão/créditos e confirme o limite de uso antes de tentar novamente."
-        : rawMessage || "Erro ao gerar imagem com IA";
+    const imageBase64 =
+      provider === "gemini"
+        ? await generateWithGemini(promptForProvider, size)
+        : await generateWithOpenAI(promptForProvider, size);
 
-      return res.status(502).json({ error: friendlyMessage, raw: data });
-    }
-
-    const b64 = data?.data?.[0]?.b64_json;
-    if (!b64) {
-      return res.status(502).json({ error: "Resposta sem imagem da IA", raw: data });
-    }
-
-    return res.status(200).json({ imageBase64: `data:image/png;base64,${b64}` });
+    return res.status(200).json({ imageBase64, provider: provider === "gemini" ? "gemini" : "openai" });
   } catch (err) {
     console.error("Erro ao gerar criativo com IA:", err);
     return res.status(500).json({ error: err.message });
