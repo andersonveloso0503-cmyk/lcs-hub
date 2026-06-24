@@ -273,9 +273,12 @@ Style: polished, corporate, B2B marketing photo.`;
   return `data:image/png;base64,${b64}`;
 }
 
+// Usa Gemini 2.5 Flash Image ("Nano Banana") via generateContent — os
+// modelos Imagen (imagen-3.x/4.x) usam endpoint :predict e estão sendo
+// descontinuados pela Google. Custo aprox. $0.039/imagem (1024px).
 async function generateCreativeGemini(service, format) {
   const aiKey = SERVICE_TO_AI_KEY[service] || "Limpeza";
-  const aspectRatio = format === "stories" ? "9:16" : "1:1";
+  const aspectHint = format === "stories" ? " Vertical 9:16 aspect ratio, portrait orientation." : " Square 1:1 aspect ratio.";
   const scene = SCENE_BY_SERVICE[aiKey] || SCENE_BY_SERVICE.Limpeza;
 
   // Gemini não escreve texto embutido com confiabilidade, então o prompt
@@ -283,23 +286,24 @@ async function generateCreativeGemini(service, format) {
   const imagePrompt = `Professional, modern Instagram marketing photo for a Brazilian facilities services company "LCS Terceirização" (cleaning, security/portaria, facilities and maintenance services for condominiums and businesses in Porto Alegre, Brazil).
 Service: ${aiKey}.
 A realistic, professional photo showing: ${scene}.
-Clean, professional, corporate aesthetic, high quality photo, suitable for a real business's social media. No text overlays.`;
+Clean, professional, corporate aesthetic, high quality photo, suitable for a real business's social media. No text overlays.${aspectHint}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${process.env.GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${process.env.GEMINI_API_KEY}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      instances: [{ prompt: imagePrompt }],
-      parameters: { sampleCount: 1, aspectRatio, personGeneration: "allow_adult", safetySetting: "block_only_high" },
+      contents: [{ parts: [{ text: imagePrompt }] }],
+      generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
     }),
   });
 
   const data = await res.json();
   if (!res.ok || data?.error) throw new Error(`Gemini sem imagem para ${service}: ${data?.error?.message || res.status}`);
-  const b64 = data?.predictions?.[0]?.bytesBase64Encoded;
-  if (!b64) throw new Error(`Gemini sem imagem para ${service}: resposta sem bytesBase64Encoded`);
-  return `data:image/png;base64,${b64}`;
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const imagePart = parts.find((p) => p.inlineData?.mimeType?.startsWith("image/"));
+  if (!imagePart) throw new Error(`Gemini sem imagem para ${service}: resposta sem inlineData`);
+  return `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`;
 }
 
 async function generateCreative(service, format, provider) {

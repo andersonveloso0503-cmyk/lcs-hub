@@ -19,21 +19,20 @@
 // qualidade). Texto embutido na imagem é menos confiável que o GPT-Image,
 // então preferir esse provider quando a prioridade é custo, não precisão
 // do texto desenhado.
+// Usa Gemini 2.5 Flash Image ("Nano Banana") via endpoint generateContent —
+// os modelos Imagen (imagen-3.x, imagen-4.x) usam endpoint :predict diferente
+// e estão sendo descontinuados pela Google em favor desta família. Custo
+// aprox. $0.039/imagem (1024px), cobrado como tokens de output de imagem.
 async function generateWithGemini(prompt, size) {
-  const aspectRatio = size === "1024x1536" ? "9:16" : "1:1";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${process.env.GEMINI_API_KEY}`;
+  const aspectHint = size === "1024x1536" ? " Vertical 9:16 aspect ratio, portrait orientation." : " Square 1:1 aspect ratio.";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      instances: [{ prompt }],
-      parameters: {
-        sampleCount: 1,
-        aspectRatio,
-        personGeneration: "allow_adult",
-        safetySetting: "block_only_high",
-      },
+      contents: [{ parts: [{ text: prompt + aspectHint }] }],
+      generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
     }),
   });
 
@@ -44,10 +43,11 @@ async function generateWithGemini(prompt, size) {
     throw new Error(message);
   }
 
-  const b64 = data?.predictions?.[0]?.bytesBase64Encoded;
-  if (!b64) throw new Error("Resposta sem imagem do Gemini");
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const imagePart = parts.find((p) => p.inlineData?.mimeType?.startsWith("image/"));
+  if (!imagePart) throw new Error("Resposta sem imagem do Gemini");
 
-  return `data:image/png;base64,${b64}`;
+  return `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`;
 }
 
 async function generateWithOpenAI(prompt, size) {
