@@ -449,8 +449,12 @@ export default async function handler(req, res) {
 
     console.log("[auto-week] Iniciando geração...");
     const monday = getNextMonday();
-    const provider = getProviderForWeek(monday);
-    console.log(`[auto-week] Provider de imagem desta semana: ${provider} (semana ISO ${getIsoWeekNumber(monday)})`);
+    // Alternância Gemini/OpenAI desativada por ora — Gemini exige billing
+    // ativado no Google Cloud para gerar imagens (cota gratuita é zero desde
+    // dez/2025). Pra reativar a alternância, troque a linha abaixo de volta
+    // para: const provider = getProviderForWeek(monday);
+    const provider = "openai";
+    console.log(`[auto-week] Provider de imagem desta semana: ${provider}`);
     const igResults = [];
 
     // Gera legendas
