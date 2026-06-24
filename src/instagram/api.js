@@ -40,12 +40,12 @@ export async function generateHeadline(service) {
  * própria. Atenção: a IA pode errar a escrita de texto dentro da imagem —
  * sempre revisar visualmente antes de usar.
  */
-export async function generateCreativeAI({ service, headline, format }) {
+export async function generateCreativeAI({ service, headline, format, provider }) {
   try {
     const res = await fetch("/api/generate-creative-ai", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ service, headline, format }),
+      body: JSON.stringify({ service, headline, format, provider }),
     });
     const data = await res.json();
     if (!res.ok) return { ok: false, error: data.error || "Erro ao gerar criativo com IA" };
