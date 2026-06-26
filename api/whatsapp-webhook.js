@@ -60,7 +60,90 @@ const EMPRESA_PRESENTATION_URL = process.env.EMPRESA_PRESENTATION_URL || "";
 
 // WhatsApp do especialista que recebe os dados de cada orçamento finalizado.
 const ESPECIALISTA_WHATSAPP = process.env.ESPECIALISTA_WHATSAPP || "5551985025102";
+// Projeto Firebase para envio de push notifications (FCM)
+const FCM_PROJECT_ID = "lcscrm";
 
+async function getFcmAccessToken() {
+  const serviceAccount = JSON.parse(process.env.FCM_SERVICE_ACCOUNT);
+  const auth = new GoogleAuth({
+    credentials: serviceAccount,
+    scopes: ["https://www.googleapis.com/auth/firebase.messaging"],
+  });
+  const client = await auth.getClient();
+  const { token } = await client.getAccessToken();
+  return token;
+}
+
+/**
+ * Dispara push notification pros dispositivos cadastrados e incrementa
+ * o contador de não lidas no Firestore. Chamar quando o CLIENTE manda
+ * mensagem (branch onde fromMe === false).
+ */
+async function notificarNovaMensagemWhatsApp({ db, phone, pushName, texto }) {
+  try {
+    const unreadRef = doc(db, "whatsapp_status", "unread");
+    await setDoc(
+      unreadRef,
+      { count: increment(1), atualizadoEm: serverTimestamp() },
+      { merge: true }
+    );
+    const unreadSnap = await getDoc(unreadRef);
+    const unreadCount = unreadSnap.exists() ? unreadSnap.data().count || 1 : 1;
+
+    const tokensSnap = await getDocs(collection(db, "fcm_tokens"));
+    if (tokensSnap.empty) return;
+
+    const accessToken = await getFcmAccessToken();
+    const nome = pushName || phone;
+    const corpoMsg =
+      texto && texto.length > 80 ? texto.slice(0, 80) + "..." : texto || "Nova mensagem";
+
+    const envios = tokensSnap.docs.map(async (tokenDoc) => {
+      const token = tokenDoc.id;
+      const body = {
+        message: {
+          token,
+          notification: {
+            title: `💬 ${nome}`,
+            body: corpoMsg,
+          },
+          data: {
+            unreadCount: String(unreadCount),
+            phone: String(phone),
+          },
+          webpush: {
+            headers: { Urgency: "high" },
+            fcm_options: { link: "/?tab=whatsapp" },
+          },
+        },
+      };
+
+      const res = await fetch(
+        `https://fcm.googleapis.com/v1/projects/${FCM_PROJECT_ID}/messages:send`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        }
+      );
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error(`Erro ao enviar push (token ${token.slice(0, 12)}...):`, errText);
+        if (res.status === 404 || res.status === 400) {
+          await updateDoc(doc(db, "fcm_tokens", token), { invalido: true }).catch(() => {});
+        }
+      }
+    });
+
+    await Promise.allSettled(envios);
+  } catch (err) {
+    console.error("Erro em notificarNovaMensagemWhatsApp:", err);
+  }
+}
 /**
  * Monta a mensagem com todos os dados coletados no fluxo de orçamento, pra
  * mandar pro especialista (Luís) assim que o cliente termina de responder.
