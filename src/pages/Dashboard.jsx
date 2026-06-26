@@ -5,7 +5,7 @@ import { getPendingFollowUps } from "../crm/followUp";
 import { useWhatsAppMessages } from "../crm/useWhatsAppMessages";
 import { usePosts } from "../instagram/usePosts";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
-
+import { NotificacoesCard } from "../components/NotificacoesCard";
 function isWithinNext7Days(isoDate) {
   if (!isoDate) return false;
   const date = new Date(isoDate);
