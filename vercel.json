@@ -6,6 +6,10 @@
     {
       "path": "/api/auto-week",
       "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/google-ads-fetch-real",
+      "schedule": "0 8 * * *"
     }
   ]
 }
