@@ -48,24 +48,11 @@ export default function Dashboard() {
           </p>
         </div>
       </div>
-return (
-    <div>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Visão geral</h1>
-          <p className="page-subtitle">
-            Dados em tempo real do Firestore — projeto lcscrm
-          </p>
-        </div>
-      </div>
 
-      {/* ⬇️ ADICIONAR AQUI ⬇️ */}
       <div style={{ marginBottom: 20 }}>
         <NotificacoesCard />
       </div>
-      {/* ⬆️ FIM ⬆️ */}
-
-      {/* ... resto do conteúdo que já existia continua igual ... */}
+             {/* ... resto do conteúdo que já existia continua igual ... */}
       {error && (
         <div className="card error-card">
           <strong>Não foi possível conectar ao Firebase.</strong>
