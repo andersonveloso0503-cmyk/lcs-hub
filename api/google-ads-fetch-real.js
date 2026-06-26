@@ -84,11 +84,12 @@ async function getAccessToken() {
 }
 
 /**
- * Consulta a Google Ads API (GAQL) pedindo as campanhas e seus atributos
- * estruturais (nome, status, tipo, orçamento, estratégia de lance, data de
- * início) — sem métricas de performance ainda, igual ao snapshot mock
- * anterior. Métricas (cliques, custo, conversões) podem ser adicionadas
- * depois acrescentando campos "metrics.*" na query e no parser abaixo.
+ * Consulta a Google Ads API (GAQL) pedindo as campanhas, seus atributos
+ * estruturais (nome, status, tipo, orçamento, estratégia de lance) e
+ * métricas de performance dos últimos 30 dias (cliques, impressões, custo,
+ * conversões, CTR, CPC médio). Cada linha do resultado já vem segmentada
+ * pelo período pedido em DURING LAST_30_DAYS, então não precisamos somar
+ * manualmente — a própria API agrega.
  */
 async function fetchCampaigns(accessToken) {
   const query = `
@@ -99,8 +100,16 @@ async function fetchCampaigns(accessToken) {
       campaign.advertising_channel_type,
       campaign.start_date_time,
       campaign.bidding_strategy_type,
-      campaign_budget.amount_micros
+      campaign_budget.amount_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.cost_micros,
+      metrics.conversions,
+      metrics.conversions_value,
+      metrics.ctr,
+      metrics.average_cpc
     FROM campaign
+    WHERE segments.date DURING LAST_30_DAYS
     ORDER BY campaign.name
   `;
 
@@ -131,6 +140,7 @@ async function fetchCampaigns(accessToken) {
 
   return rows.map((row) => {
     const c = row.campaign || {};
+    const m = row.metrics || {};
     const budgetMicros = row.campaignBudget?.amountMicros;
     // v24 renomeou start_date -> start_date_time; o valor vem como
     // "YYYY-MM-DD HH:MM:SS" (com hora), então pegamos só a parte da data
@@ -138,7 +148,22 @@ async function fetchCampaigns(accessToken) {
     // (new Date(campaign.start_date) / toLocaleDateString).
     const startDateTime = c.startDateTime || null;
     const startDate = startDateTime ? startDateTime.split(" ")[0] : null;
-    return {
+
+    const clicks = Number(m.clicks || 0);
+    const impressions = Number(m.impressions || 0);
+    const costMicros = Number(m.costMicros || 0);
+    const conversions = Number(m.conversions || 0);
+    const conversionsValue = Number(m.conversionsValue || 0);
+    // ctr e average_cpc vêm como fração/micros prontos da própria API, mas
+    // recalculamos a partir dos brutos pra evitar inconsistência de
+    // arredondamento quando clicks/impressions for 0.
+    const ctr = impressions > 0 ? clicks / impressions : 0;
+    const cost = costMicros / 1_000_000;
+    const avgCpc = clicks > 0 ? cost / clicks : 0;
+    const convRate = clicks > 0 ? conversions / clicks : 0;
+    const cpa = conversions > 0 ? cost / conversions : null;
+
+    const campaign = {
       campaign_id: c.id,
       name: c.name,
       status: c.status, // "ENABLED" | "PAUSED" | "REMOVED"
@@ -146,8 +171,75 @@ async function fetchCampaigns(accessToken) {
       bidding_strategy: c.biddingStrategyType,
       start_date: startDate,
       budget_amount: budgetMicros ? Number(budgetMicros) / 1_000_000 : 0,
+      metrics: {
+        impressions,
+        clicks,
+        cost,
+        conversions,
+        conversions_value: conversionsValue,
+        ctr, // fração 0-1 (ex.: 0.042 = 4.2%)
+        avg_cpc: avgCpc,
+        conv_rate: convRate,
+        cpa, // null quando não há conversões (evita divisão por zero confusa no frontend)
+      },
     };
+
+    campaign.lcs_score = calculateLcsScore(campaign);
+    return campaign;
   });
+}
+
+/**
+ * LCS Score — nota de 0 a 10 que resume a saúde da campanha num único
+ * número, inspirada em ferramentas como o GIO Score. Pondera 3 dimensões:
+ *
+ *   - Performance (peso 5): CTR e taxa de conversão, normalizados contra
+ *     benchmarks de mercado para o setor de serviços locais B2B/B2C no
+ *     Brasil (fontes variam, mas CTR médio em Search costuma girar entre
+ *     2-5% e taxa de conversão entre 3-8% — usamos esses intervalos como
+ *     "bom" e escalamos linearmente fora deles).
+ *   - Eficiência de custo (peso 3): CPA mais baixo é melhor; sem
+ *     conversões no período, não há como avaliar eficiência de custo
+ *     então essa dimensão fica neutra (nota 5) em vez de penalizar.
+ *   - Estrutura (peso 2): campanha ativa com orçamento definido pontua
+ *     melhor que campanha pausada ou sem orçamento configurado — é um
+ *     proxy simples de "está configurada para rodar" até termos mais
+ *     sinais estruturais (extensões, qualidade de anúncio, etc.).
+ *
+ * Pesos e benchmarks são uma primeira aproximação deliberadamente simples;
+ * ajustar conforme os dados reais da conta forem se acumulando ao longo
+ * das semanas (ex.: comparar contra a média histórica da própria conta em
+ * vez de benchmarks genéricos de mercado).
+ */
+function calculateLcsScore(campaign) {
+  const { status, budget_amount, metrics } = campaign;
+  const { ctr, conv_rate, conversions, clicks } = metrics;
+
+  // Sem cliques suficientes no período, não há sinal de performance
+  // confiável — pontuação neutra em vez de 0 (que pareceria "campanha
+  // ruim" quando na verdade é só "sem dados ainda").
+  const hasEnoughData = clicks >= 10;
+
+  // Performance: CTR contra benchmark "bom" de 3% (escala 0-10, capado).
+  const ctrScore = hasEnoughData ? Math.min(10, (ctr / 0.03) * 10) : 5;
+  // Performance: taxa de conversão contra benchmark "bom" de 5%.
+  const convScore = hasEnoughData ? Math.min(10, (conv_rate / 0.05) * 10) : 5;
+  const performanceScore = (ctrScore + convScore) / 2;
+
+  // Eficiência de custo: só avaliável havendo conversões; sem isso, fica
+  // neutra (não penaliza nem beneficia) até haver dado suficiente.
+  const costEfficiencyScore = conversions > 0 ? 7 : 5; // placeholder neutro-positivo; refinar com CPA real por segmento depois
+
+  // Estrutura: ativa + orçamento configurado = pontuação máxima nessa
+  // dimensão; qualquer um dos dois faltando reduz a nota.
+  let structureScore = 0;
+  if (status === "ENABLED") structureScore += 6;
+  if (budget_amount > 0) structureScore += 4;
+
+  const weighted =
+    performanceScore * 0.5 + costEfficiencyScore * 0.3 + structureScore * 0.2;
+
+  return Math.round(weighted * 10) / 10; // 1 casa decimal
 }
 
 /** Mesma lógica de comparação de snapshots usada no endpoint mock anterior. */
@@ -160,6 +252,16 @@ function detectAlerts(oldCampaigns, newCampaigns) {
     const old = oldById.get(c.campaign_id);
     if (old && old.status !== c.status) {
       alerts.push(`📢 Campanha "${c.name}" mudou de status: ${old.status} → ${c.status}`);
+    }
+    // Queda relevante de LCS Score em relação à última sincronização —
+    // limiar de 1.5 pontos evita ruído de pequenas flutuações naturais.
+    if (old && typeof old.lcs_score === "number" && typeof c.lcs_score === "number") {
+      const drop = old.lcs_score - c.lcs_score;
+      if (drop >= 1.5) {
+        alerts.push(
+          `📉 LCS Score da campanha "${c.name}" caiu de ${old.lcs_score} para ${c.lcs_score}`
+        );
+      }
     }
   }
   for (const c of newCampaigns) {
