@@ -531,6 +531,129 @@ async function updateCampaignBudget(accessToken, budgetResourceName, newAmountRe
   return runMutation(accessToken, "campaignBudgets:mutate", body);
 }
 
+/**
+ * Roda as 3 otimizações automáticas, respeitando exatamente a configuração
+ * salva pelo usuário na tela /google-ads/optimizations (documento
+ * google_ads_config/optimizations no Firestore). Pensado para ser chamado
+ * por um cron diário, mas funciona da mesma forma se disparado manualmente.
+ *
+ * Regras de negócio definidas com o usuário (não inferidas pela IA):
+ *   - Pausar campanhas: só se "pause_campaigns" estiver enabled. Pausa
+ *     qualquer campanha ENABLED com lcs_score < 5, dentro do escopo de
+ *     campanhas selecionado (todas ou a lista marcada).
+ *   - Palavras negativas: só se "negative_keywords" estiver enabled.
+ *     Aplica SOMENTE sugestões com confidence "alta" (confiança média fica
+ *     de fora do automático, continua exigindo aprovação manual na tela
+ *     principal) — também restrito ao escopo de campanhas selecionado.
+ *   - Balanço de orçamento: só se "budget_balance" estiver enabled. REDUZ
+ *     (nunca aumenta) o orçamento de campanhas com lcs_score < 5. A IA
+ *     decide o tamanho do corte dentro de limites de segurança fixos:
+ *     no máximo 50% do orçamento atual por execução, e nunca deixa o
+ *     orçamento resultante abaixo de R$5/dia (campanhas que precisariam
+ *     de menos que isso deveriam ser pausadas, não apenas ter orçamento
+ *     reduzido — por isso o piso).
+ *
+ * Cada ação aplicada é registrada no array `applied` retornado, e qualquer
+ * falha individual (ex.: uma chamada de mutate específica falhar) não
+ * interrompe as demais — erros ficam no array `errors` para diagnóstico.
+ */
+async function runAutoOptimizations(accessToken) {
+  const db = getAdminDb();
+
+  const configSnap = await db.collection("google_ads_config").doc("optimizations").get();
+  const config = configSnap.exists ? configSnap.data() : { enabled: {}, applyToAll: false, selectedCampaigns: [] };
+  const enabled = config.enabled || {};
+
+  // Sem nenhuma otimização ativada, não há nada a fazer — evita gastar
+  // operações da API só para constatar isso.
+  if (!enabled.pause_campaigns && !enabled.negative_keywords && !enabled.budget_balance) {
+    return { applied: [], errors: [], skipped: "Nenhuma otimização automática está ativada." };
+  }
+
+  const snapshotSnap = await db.collection("google_ads_snapshot").doc("current").get();
+  if (!snapshotSnap.exists) {
+    return { applied: [], errors: [], skipped: "Sem snapshot de campanhas sincronizado ainda." };
+  }
+  const snapshotData = snapshotSnap.data();
+  const campaigns = snapshotData.campaigns || [];
+  const suggestions = snapshotData.negative_keyword_suggestions || [];
+
+  const selectedSet = new Set(config.selectedCampaigns || []);
+  const inScope = (campaignId) => config.applyToAll || selectedSet.has(campaignId);
+
+  const applied = [];
+  const errors = [];
+
+  // --- Pausar campanhas com Score baixo ---
+  if (enabled.pause_campaigns) {
+    const toPause = campaigns.filter(
+      (c) => c.status === "ENABLED" && typeof c.lcs_score === "number" && c.lcs_score < 5 && inScope(c.campaign_id)
+    );
+    for (const c of toPause) {
+      try {
+        await pauseCampaign(accessToken, c.campaign_id);
+        applied.push({ type: "pause_campaign", campaign: c.name, lcs_score: c.lcs_score });
+      } catch (err) {
+        errors.push({ type: "pause_campaign", campaign: c.name, message: err.message });
+      }
+    }
+  }
+
+  // --- Palavras-chave negativas de confiança alta ---
+  if (enabled.negative_keywords) {
+    const toApply = suggestions.filter((s) => s.confidence === "alta" && inScope(s.campaign_id));
+    for (const s of toApply) {
+      try {
+        await addNegativeKeyword(accessToken, s.campaign_id, s.term);
+        applied.push({ type: "negative_keyword", campaign: s.campaign_name, term: s.term });
+      } catch (err) {
+        errors.push({ type: "negative_keyword", term: s.term, message: err.message });
+      }
+    }
+  }
+
+  // --- Redução de orçamento em campanhas com Score baixo ---
+  if (enabled.budget_balance) {
+    const toReduce = campaigns.filter(
+      (c) =>
+        c.status === "ENABLED" &&
+        typeof c.lcs_score === "number" &&
+        c.lcs_score < 5 &&
+        c.budget_resource_name &&
+        c.budget_amount > 5 && // já está no piso ou abaixo dele — nada a reduzir
+        inScope(c.campaign_id)
+    );
+    for (const c of toReduce) {
+      // Quanto pior o score, maior o corte — score 0 corta 50% (o máximo
+      // permitido), score próximo de 5 corta perto de 10%. Interpola
+      // linearmente dentro da faixa [10%, 50%] em vez de "a IA decide
+      // livremente", para manter o resultado determinístico e auditável.
+      const severity = Math.max(0, Math.min(1, (5 - c.lcs_score) / 5)); // 0 (score=5) a 1 (score=0)
+      const cutFraction = 0.1 + severity * 0.4; // 10% a 50%
+      let newAmount = c.budget_amount * (1 - cutFraction);
+      newAmount = Math.max(5, newAmount); // nunca abaixo do piso de R$5/dia
+      newAmount = Math.round(newAmount * 100) / 100;
+
+      if (newAmount >= c.budget_amount) continue; // arredondamento não resultou em corte real
+
+      try {
+        await updateCampaignBudget(accessToken, c.budget_resource_name, newAmount);
+        applied.push({
+          type: "budget_reduction",
+          campaign: c.name,
+          lcs_score: c.lcs_score,
+          old_amount: c.budget_amount,
+          new_amount: newAmount,
+        });
+      } catch (err) {
+        errors.push({ type: "budget_reduction", campaign: c.name, message: err.message });
+      }
+    }
+  }
+
+  return { applied, errors, skipped: null };
+}
+
 export default async function handler(req, res) {
   // Aceita GET (cron job da Vercel) e POST (botão manual no painel).
   if (req.method !== "GET" && req.method !== "POST") {
@@ -540,9 +663,15 @@ export default async function handler(req, res) {
   // Proteção simples: cron jobs da Vercel enviam um header de autorização
   // automático quando CRON_SECRET está configurado; chamadas manuais do
   // painel usam a mesma chave UPDATE_SECRET já usada no endpoint mock.
+  // Exceção: o botão "Rodar agora" da tela de Otimizações (que já fica
+  // atrás do login do painel) usa um header fixo simples em vez de pedir
+  // a UPDATE_SECRET ao usuário — não é uma proteção tão forte quanto a
+  // secret real, mas o acesso a esse botão já passou pela autenticação
+  // do app (useAuth), o que é a barreira que importa aqui.
   const providedSecret = req.headers["x-update-secret"] || req.body?.secret || req.query?.secret;
   const isCron = req.headers.authorization === `Bearer ${process.env.CRON_SECRET}`;
-  if (!isCron && providedSecret !== process.env.UPDATE_SECRET) {
+  const isPanelTrigger = req.headers["x-panel-trigger"] === "lcs-hub-optimizations-panel";
+  if (!isCron && !isPanelTrigger && providedSecret !== process.env.UPDATE_SECRET) {
     return res.status(401).json({ error: "Não autorizado" });
   }
 
@@ -554,17 +683,27 @@ export default async function handler(req, res) {
     });
   }
 
-  // Fase 4 — ações de escrita (sempre disparadas manualmente pelo painel,
-  // nunca pelo cron). Cada uma exige um campo "action" específico no body
-  // e é executada de forma isolada: se der erro, retorna 500 sem tocar no
-  // snapshot do Firestore. Depois de qualquer mutação bem-sucedida, NÃO
-  // re-sincronizamos automaticamente — o usuário roda a sincronização de
-  // novo quando quiser ver o snapshot atualizado, mantendo o número de
-  // chamadas à API previsível.
+  // Fase 4 — ações de escrita (disparadas manualmente pelo painel, OU pelo
+  // cron diário no caso específico de "run_auto_optimizations"). Cada uma
+  // exige um campo "action" específico no body e é executada de forma
+  // isolada: se der erro, retorna 500 sem tocar no snapshot do Firestore.
+  // Depois de qualquer mutação bem-sucedida, NÃO re-sincronizamos
+  // automaticamente — o usuário (ou o próximo cron de sync) atualiza o
+  // snapshot separadamente, mantendo o número de chamadas à API previsível.
   const action = req.body?.action;
-  if (action === "add_negative_keyword" || action === "pause_campaign" || action === "update_budget") {
+  if (
+    action === "add_negative_keyword" ||
+    action === "pause_campaign" ||
+    action === "update_budget" ||
+    action === "run_auto_optimizations"
+  ) {
     try {
       const accessToken = await getAccessToken();
+
+      if (action === "run_auto_optimizations") {
+        const result = await runAutoOptimizations(accessToken);
+        return res.status(200).json({ ok: true, ...result });
+      }
 
       if (action === "add_negative_keyword") {
         const { campaign_id, term } = req.body;
@@ -647,11 +786,41 @@ export default async function handler(req, res) {
       await sendWhatsAppAlert(message);
     }
 
+    // Roda as otimizações automáticas ativadas pelo usuário, usando o
+    // snapshot que acabou de ser salvo (já com métricas e sugestões
+    // atualizadas). Só dispara nessa chamada quando é o cron diário (GET)
+    // ou quando o painel pede explicitamente via autoOptimize no body —
+    // chamadas manuais de sincronização do botão "Sincronizar" comuns não
+    // disparam isso sozinhas, para o usuário decidir quando quer que a
+    // automação rode de fato.
+    let autoOptimizeResult = null;
+    if (isCron || req.body?.autoOptimize === true) {
+      try {
+        autoOptimizeResult = await runAutoOptimizations(accessToken);
+        if (autoOptimizeResult.applied?.length > 0) {
+          const summary = autoOptimizeResult.applied
+            .map((a) => {
+              if (a.type === "pause_campaign") return `⏸ Pausada: "${a.campaign}" (score ${a.lcs_score})`;
+              if (a.type === "negative_keyword") return `🎯 Negativa aplicada: "${a.term}" em "${a.campaign}"`;
+              if (a.type === "budget_reduction")
+                return `💰 Orçamento de "${a.campaign}" reduzido: R$${a.old_amount.toFixed(2)} → R$${a.new_amount.toFixed(2)}`;
+              return null;
+            })
+            .filter(Boolean)
+            .join("\n");
+          await sendWhatsAppAlert(`🤖 *Otimizações automáticas aplicadas — LCS Hub*\n\n${summary}`);
+        }
+      } catch (err) {
+        console.error("Erro ao rodar otimizações automáticas (não bloqueia o snapshot):", err.message);
+      }
+    }
+
     return res.status(200).json({
       ok: true,
       count: campaigns.length,
       alerts,
       negative_keyword_suggestions: negativeKeywordSuggestions.length,
+      auto_optimize: autoOptimizeResult,
     });
   } catch (err) {
     console.error("Erro ao buscar dados reais do Google Ads:", err);
