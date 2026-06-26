@@ -13,9 +13,6 @@ self.addEventListener("activate", (event) => {
 // sem interceptação. Isso garante que o app sempre mostra dados atuais.
 
 // ===================== PUSH NOTIFICATIONS =====================
-// Recebe o push disparado pelo backend (whatsapp-webhook.js) via FCM.
-// Formato esperado do payload (data-only message):
-// { title, body, unreadCount, phone }
 self.addEventListener("push", (event) => {
   let payload = {};
   try {
@@ -43,4 +40,41 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     Promise.all([
       self.registration.showNotification(title, notificationOptions),
-      unreadCount > 0 && "setAppBadge" in
+      unreadCount > 0 && "setAppBadge" in self.navigator
+        ? self.navigator.setAppBadge(unreadCount).catch(() => {})
+        : Promise.resolve(),
+    ])
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = (event.notification.data && event.notification.data.url) || "/";
+
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientsArr) => {
+      const existing = clientsArr.find((c) => c.url.includes(self.location.origin));
+      if (existing) {
+        existing.focus();
+        existing.postMessage({ type: "NAVIGATE_WHATSAPP", url: targetUrl });
+        return;
+      }
+      return self.clients.openWindow(targetUrl);
+    })
+  );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "CLEAR_BADGE") {
+    if ("clearAppBadge" in self.navigator) {
+      self.navigator.clearAppBadge().catch(() => {});
+    }
+  }
+  if (event.data && event.data.type === "SET_BADGE") {
+    const count = Number(event.data.count) || 0;
+    if ("setAppBadge" in self.navigator) {
+      if (count > 0) self.navigator.setAppBadge(count).catch(() => {});
+      else self.navigator.clearAppBadge().catch(() => {});
+    }
+  }
+});
