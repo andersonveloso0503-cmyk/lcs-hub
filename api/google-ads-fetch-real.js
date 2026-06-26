@@ -19,7 +19,7 @@
 
 import { getAdminDb } from "./firebaseAdmin.js";
 
-const GOOGLE_ADS_API_VERSION = "v19";
+const GOOGLE_ADS_API_VERSION = "v24";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
 const CLIENT_ID = process.env.GOOGLE_ADS_CLIENT_ID;
