@@ -97,7 +97,7 @@ async function fetchCampaigns(accessToken) {
       campaign.name,
       campaign.status,
       campaign.advertising_channel_type,
-      campaign.start_date,
+      campaign.start_date_time,
       campaign.bidding_strategy_type,
       campaign_budget.amount_micros
     FROM campaign
@@ -132,13 +132,19 @@ async function fetchCampaigns(accessToken) {
   return rows.map((row) => {
     const c = row.campaign || {};
     const budgetMicros = row.campaignBudget?.amountMicros;
+    // v24 renomeou start_date -> start_date_time; o valor vem como
+    // "YYYY-MM-DD HH:MM:SS" (com hora), então pegamos só a parte da data
+    // pra manter compatibilidade com o formato que o frontend já espera
+    // (new Date(campaign.start_date) / toLocaleDateString).
+    const startDateTime = c.startDateTime || null;
+    const startDate = startDateTime ? startDateTime.split(" ")[0] : null;
     return {
       campaign_id: c.id,
       name: c.name,
       status: c.status, // "ENABLED" | "PAUSED" | "REMOVED"
       campaign_type: c.advertisingChannelType, // "SEARCH" | "DISPLAY" | etc.
       bidding_strategy: c.biddingStrategyType,
-      start_date: c.startDate || null,
+      start_date: startDate,
       budget_amount: budgetMicros ? Number(budgetMicros) / 1_000_000 : 0,
     };
   });
