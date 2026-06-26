@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronUp, RefreshCw, AlertTriangle } from "lucide-react";
+import { ChevronDown, ChevronUp, RefreshCw, AlertTriangle, Copy, Check } from "lucide-react";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
 
 const BIDDING_LABELS = {
@@ -22,9 +22,32 @@ const TYPE_LABELS = {
 };
 
 export default function GoogleAdsModule() {
-  const { campaigns, lastUpdated, hasMetrics, alerts, loading, error } = useGoogleAdsSnapshot();
+  const {
+    campaigns,
+    lastUpdated,
+    hasMetrics,
+    alerts,
+    negativeKeywordSuggestions,
+    negativeKeywordsCheckedAt,
+    loading,
+    error,
+  } = useGoogleAdsSnapshot();
   const [showAll, setShowAll] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [dismissed, setDismissed] = useState(new Set());
+  const [copiedTerm, setCopiedTerm] = useState(null);
+
+  function handleCopy(term) {
+    navigator.clipboard?.writeText(term);
+    setCopiedTerm(term);
+    setTimeout(() => setCopiedTerm(null), 1500);
+  }
+
+  function handleDismiss(term) {
+    setDismissed((prev) => new Set(prev).add(term));
+  }
+
+  const visibleSuggestions = negativeKeywordSuggestions.filter((s) => !dismissed.has(s.term));
 
   const activeCampaigns = campaigns.filter((c) => c.status === "ENABLED");
   const pausedCampaigns = campaigns.filter((c) => c.status !== "ENABLED");
@@ -138,6 +161,78 @@ export default function GoogleAdsModule() {
           accent="pink"
         />
       </div>
+
+      {/* Sugestões de palavras-chave negativas — análise por IA dos termos
+          de pesquisa reais que gastaram dinheiro sem converter nos últimos
+          30 dias. Nada é aplicado automaticamente: o usuário copia o termo
+          e adiciona manualmente no Google Ads, ou descarta a sugestão. */}
+      {visibleSuggestions.length > 0 && (
+        <div className="card">
+          <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>🎯 Sugestões de palavras-chave negativas ({visibleSuggestions.length})</span>
+          </div>
+          <p className="muted" style={{ marginTop: 4, marginBottom: 14 }}>
+            Termos de pesquisa reais que geraram cliques pagos nos últimos 30 dias sem nenhuma
+            conversão. A IA identificou estes como provavelmente irrelevantes ao seu negócio. Copie
+            e adicione manualmente como palavra-chave negativa no Google Ads, ou descarte se achar
+            que a sugestão não se aplica.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {visibleSuggestions.map((s) => (
+              <div
+                key={s.term}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  background: "var(--bg)",
+                  border: "1px solid var(--gray-light)",
+                  flexWrap: "wrap",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    padding: "2px 7px",
+                    borderRadius: 8,
+                    color: "#fff",
+                    background: s.confidence === "alta" ? "#C62828" : "#B8860B",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {s.confidence === "alta" ? "Confiança alta" : "Confiança média"}
+                </span>
+                <strong style={{ flex: "1 1 160px" }}>"{s.term}"</strong>
+                <span className="muted" style={{ fontSize: 13, flex: "2 1 200px" }}>{s.reason}</span>
+                <span className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                  R$ {s.cost?.toFixed(2) || "0.00"} · {s.clicks || 0} cliques · {s.campaign_name}
+                </span>
+                <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+                  <button
+                    className="btn btn-outline btn-sm"
+                    onClick={() => handleCopy(s.term)}
+                    title="Copiar termo para adicionar como negativa no Google Ads"
+                  >
+                    {copiedTerm === s.term ? <Check size={13} /> : <Copy size={13} />}
+                    {copiedTerm === s.term ? "Copiado" : "Copiar"}
+                  </button>
+                  <button className="btn btn-outline btn-sm" onClick={() => handleDismiss(s.term)}>
+                    Descartar
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {negativeKeywordsCheckedAt && (
+            <p className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+              Última análise: {new Date(negativeKeywordsCheckedAt).toLocaleString("pt-BR")}
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="card">
         <div className="card-title">Campanhas ativas</div>
