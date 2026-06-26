@@ -36,6 +36,70 @@ export default function GoogleAdsModule() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [dismissed, setDismissed] = useState(new Set());
   const [copiedTerm, setCopiedTerm] = useState(null);
+  const [actionLoading, setActionLoading] = useState(null); // id da ação em andamento, pra desabilitar só o botão certo
+  const [actionFeedback, setActionFeedback] = useState(null); // { ok, message }
+  const [budgetEdits, setBudgetEdits] = useState({}); // campaign_id -> valor digitado no input de orçamento
+
+  // Chama o backend pra qualquer uma das 3 mutações da Fase 4. actionId é
+  // só uma chave única (ex.: "pause-123") pra controlar qual botão mostra
+  // o spinner — evita desabilitar a tela inteira enquanto uma ação roda.
+  async function runAction(actionId, payload) {
+    setActionLoading(actionId);
+    setActionFeedback(null);
+    try {
+      const res = await fetch("/api/google-ads-fetch-real", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erro desconhecido");
+      setActionFeedback({ ok: true, message: data.message || "Ação aplicada com sucesso." });
+      return true;
+    } catch (err) {
+      setActionFeedback({ ok: false, message: err.message });
+      return false;
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  async function handleApplyNegativeKeyword(suggestion) {
+    if (!confirm(`Adicionar "${suggestion.term}" como palavra-chave negativa na campanha "${suggestion.campaign_name}"?`)) return;
+    const ok = await runAction(`neg-${suggestion.term}`, {
+      action: "add_negative_keyword",
+      campaign_id: suggestion.campaign_id,
+      term: suggestion.term,
+    });
+    if (ok) handleDismiss(suggestion.term);
+  }
+
+  async function handlePauseCampaign(campaign) {
+    if (!confirm(`Pausar a campanha "${campaign.name}"? Ela para de gerar cliques e gastos imediatamente.`)) return;
+    await runAction(`pause-${campaign.campaign_id}`, {
+      action: "pause_campaign",
+      campaign_id: campaign.campaign_id,
+    });
+  }
+
+  async function handleUpdateBudget(campaign) {
+    const raw = budgetEdits[campaign.campaign_id];
+    const newAmount = parseFloat(String(raw).replace(",", "."));
+    if (!newAmount || newAmount <= 0) {
+      setActionFeedback({ ok: false, message: "Digite um valor de orçamento válido." });
+      return;
+    }
+    if (!campaign.budget_resource_name) {
+      setActionFeedback({ ok: false, message: "Esta campanha não tem orçamento próprio identificado (pode usar orçamento compartilhado)." });
+      return;
+    }
+    if (!confirm(`Alterar orçamento diário de "${campaign.name}" de R$ ${campaign.budget_amount.toFixed(2)} para R$ ${newAmount.toFixed(2)}?`)) return;
+    await runAction(`budget-${campaign.campaign_id}`, {
+      action: "update_budget",
+      budget_resource_name: campaign.budget_resource_name,
+      new_amount: newAmount,
+    });
+  }
 
   function handleCopy(term) {
     navigator.clipboard?.writeText(term);
@@ -104,6 +168,20 @@ export default function GoogleAdsModule() {
         <div className="card error-card">
           <strong>Não foi possível conectar ao Firebase.</strong>
           <p>{error}</p>
+        </div>
+      )}
+
+      {actionFeedback && (
+        <div
+          className="pending-metrics-note"
+          style={
+            actionFeedback.ok
+              ? { borderColor: "var(--teal)", background: "#ECFEFF" }
+              : { borderColor: "var(--pink)", background: "#FFF0F6" }
+          }
+        >
+          {actionFeedback.ok ? <Check size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--teal)" }} /> : <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--pink)" }} />}
+          <span>{actionFeedback.message}</span>
         </div>
       )}
 
@@ -212,9 +290,17 @@ export default function GoogleAdsModule() {
                 </span>
                 <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
                   <button
+                    className="btn btn-teal btn-sm"
+                    onClick={() => handleApplyNegativeKeyword(s)}
+                    disabled={actionLoading === `neg-${s.term}`}
+                    title="Aplicar de verdade na campanha, via Google Ads API"
+                  >
+                    {actionLoading === `neg-${s.term}` ? "Aplicando..." : "✓ Aplicar"}
+                  </button>
+                  <button
                     className="btn btn-outline btn-sm"
                     onClick={() => handleCopy(s.term)}
-                    title="Copiar termo para adicionar como negativa no Google Ads"
+                    title="Copiar termo para adicionar manualmente no Google Ads"
                   >
                     {copiedTerm === s.term ? <Check size={13} /> : <Copy size={13} />}
                     {copiedTerm === s.term ? "Copiado" : "Copiar"}
@@ -253,13 +339,23 @@ export default function GoogleAdsModule() {
                   <th>Conversões</th>
                   <th>Custo (30d)</th>
                   <th>Orçamento/dia</th>
+                  <th>Ações</th>
                 </tr>
               </thead>
               <tbody>
                 {[...activeCampaigns]
                   .sort((a, b) => (a.lcs_score ?? 99) - (b.lcs_score ?? 99))
                   .map((c) => (
-                    <CampaignRow key={c.campaign_id} campaign={c} />
+                    <CampaignRow
+                      key={c.campaign_id}
+                      campaign={c}
+                      showActions
+                      budgetEdits={budgetEdits}
+                      setBudgetEdits={setBudgetEdits}
+                      actionLoading={actionLoading}
+                      onPause={handlePauseCampaign}
+                      onUpdateBudget={handleUpdateBudget}
+                    />
                   ))}
               </tbody>
             </table>
@@ -344,8 +440,22 @@ export default function GoogleAdsModule() {
   );
 }
 
-function CampaignRow({ campaign, showStatus, showBidding }) {
+function CampaignRow({
+  campaign,
+  showStatus,
+  showBidding,
+  showActions,
+  budgetEdits,
+  setBudgetEdits,
+  actionLoading,
+  onPause,
+  onUpdateBudget,
+}) {
   const m = campaign.metrics || {};
+  const budgetValue = budgetEdits?.[campaign.campaign_id] ?? campaign.budget_amount?.toFixed(2) ?? "";
+  const isPausing = actionLoading === `pause-${campaign.campaign_id}`;
+  const isUpdatingBudget = actionLoading === `budget-${campaign.campaign_id}`;
+
   return (
     <tr>
       <td className="campaign-name-cell">{campaign.name}</td>
@@ -368,8 +478,46 @@ function CampaignRow({ campaign, showStatus, showBidding }) {
       <td>{m.ctr !== undefined ? `${(m.ctr * 100).toFixed(2)}%` : "—"}</td>
       <td>{(m.conversions ?? 0).toFixed(0)}</td>
       <td>{m.cost !== undefined ? `R$ ${m.cost.toFixed(2)}` : "—"}</td>
-      <td>R$ {Number(campaign.budget_amount || 0).toFixed(2)}</td>
+      <td>
+        {showActions ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ fontSize: 12 }}>R$</span>
+            <input
+              type="text"
+              value={budgetValue}
+              onChange={(e) =>
+                setBudgetEdits((prev) => ({ ...prev, [campaign.campaign_id]: e.target.value }))
+              }
+              style={{ width: 64, fontSize: 12, padding: "3px 6px", borderRadius: 6, border: "1px solid var(--gray-light)" }}
+            />
+            <button
+              className="btn btn-outline btn-sm"
+              style={{ padding: "3px 8px", fontSize: 11 }}
+              onClick={() => onUpdateBudget(campaign)}
+              disabled={isUpdatingBudget}
+              title="Salvar novo orçamento diário"
+            >
+              {isUpdatingBudget ? "..." : "Salvar"}
+            </button>
+          </div>
+        ) : (
+          `R$ ${Number(campaign.budget_amount || 0).toFixed(2)}`
+        )}
+      </td>
       {showBidding && <td>{BIDDING_LABELS[campaign.bidding_strategy] || campaign.bidding_strategy}</td>}
+      {showActions && (
+        <td>
+          <button
+            className="btn btn-outline btn-sm"
+            style={{ fontSize: 11, color: "var(--pink)", borderColor: "var(--pink)" }}
+            onClick={() => onPause(campaign)}
+            disabled={isPausing}
+            title="Pausar esta campanha imediatamente"
+          >
+            {isPausing ? "Pausando..." : "⏸ Pausar"}
+          </button>
+        </td>
+      )}
     </tr>
   );
 }
