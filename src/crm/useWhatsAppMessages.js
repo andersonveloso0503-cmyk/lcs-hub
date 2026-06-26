@@ -4,7 +4,12 @@ import {
   onSnapshot,
   query,
   orderBy,
+  where,
   addDoc,
+  getDocs,
+  doc,
+  writeBatch,
+  increment,
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "../firebase/config";
@@ -50,6 +55,10 @@ export function useWhatsAppMessages() {
         phone,
         messages: msgs,
         lastMessage: msgs[msgs.length - 1],
+        // Conta quantas mensagens dessa conversa ainda não foram lidas
+        // (lida === false). Mensagens antigas sem o campo "lida" são
+        // tratadas como já lidas, pra não aparecer contador retroativo.
+        unreadCount: msgs.filter((m) => m.lida === false).length,
       }))
       .sort(
         (a, b) =>
@@ -78,6 +87,7 @@ export function useWhatsAppMessages() {
       messageTimestamp: Date.now(),
       createdAt: serverTimestamp(),
       sentFromCRM: true,
+      lida: true,
     });
   }
 
@@ -98,7 +108,39 @@ export function useWhatsAppMessages() {
       messageTimestamp: Date.now(),
       createdAt: serverTimestamp(),
       sentFromCRM: true,
+      lida: true,
     });
+  }
+
+  /**
+   * Marca como lidas todas as mensagens não lidas de um telefone específico,
+   * e decrementa o contador global de não lidas (usado no badge do ícone do
+   * app) pela quantidade exata de mensagens que foram marcadas — não zera
+   * tudo, só o que pertence a essa conversa.
+   */
+  async function marcarConversaComoLida(rawPhone) {
+    const phone = normalizePhone(rawPhone);
+    const q = query(
+      collection(db, COLLECTION),
+      where("phone", "==", phone),
+      where("lida", "==", false)
+    );
+    const snap = await getDocs(q);
+    if (snap.empty) return;
+
+    const batch = writeBatch(db);
+    snap.docs.forEach((docSnap) => {
+      batch.update(docSnap.ref, { lida: true });
+    });
+
+    const unreadRef = doc(db, "whatsapp_status", "unread");
+    batch.set(
+      unreadRef,
+      { count: increment(-snap.size), atualizadoEm: serverTimestamp() },
+      { merge: true }
+    );
+
+    await batch.commit();
   }
 
   return {
@@ -109,5 +151,6 @@ export function useWhatsAppMessages() {
     getMessagesForPhone,
     logOutgoingMessage,
     logOutgoingAudio,
+    marcarConversaComoLida,
   };
 }

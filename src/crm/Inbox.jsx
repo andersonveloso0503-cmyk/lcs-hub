@@ -27,8 +27,14 @@ function formatRelativeTime(ts) {
 }
 
 export default function Inbox({ contacts, onCreateContact, onUpdateContactStatus }) {
-  const { conversations, loading, getMessagesForPhone, logOutgoingMessage, logOutgoingAudio } =
-    useWhatsAppMessages();
+  const {
+    conversations,
+    loading,
+    getMessagesForPhone,
+    logOutgoingMessage,
+    logOutgoingAudio,
+    marcarConversaComoLida,
+  } = useWhatsAppMessages();
   const [selectedPhone, setSelectedPhone] = useState(null);
   const [search, setSearch] = useState("");
   const [savingPhone, setSavingPhone] = useState(null);
@@ -56,6 +62,15 @@ export default function Inbox({ contacts, onCreateContact, onUpdateContactStatus
 
   const selectedMessages = selectedPhone ? getMessagesForPhone(selectedPhone) : [];
   const selectedContact = selectedPhone ? contactByPhone.get(selectedPhone) : null;
+
+  function handleSelectConversation(phone) {
+    setSelectedPhone(phone);
+    // Marca como lidas todas as mensagens dessa conversa e decrementa
+    // o contador do badge pela quantidade exata — igual o WhatsApp faz.
+    marcarConversaComoLida(phone).catch((err) =>
+      console.error("Erro ao marcar conversa como lida:", err)
+    );
+  }
 
   async function handleStatusChange(conv, newStatus) {
     setSavingPhone(conv.phone);
@@ -113,7 +128,7 @@ export default function Inbox({ contacts, onCreateContact, onUpdateContactStatus
             >
               <button
                 className="inbox-item"
-                onClick={() => setSelectedPhone(conv.phone)}
+                onClick={() => handleSelectConversation(conv.phone)}
               >
                 <div className="inbox-avatar">
                   {(name || conv.phone).charAt(0).toUpperCase()}
@@ -130,6 +145,9 @@ export default function Inbox({ contacts, onCreateContact, onUpdateContactStatus
                     {conv.lastMessage?.text}
                   </div>
                 </div>
+                {conv.unreadCount > 0 && (
+                  <span className="inbox-unread-badge">{conv.unreadCount}</span>
+                )}
               </button>
               <select
                 className={"inbox-status-select" + (currentStatus ? " status-" + currentStatus : "")}
