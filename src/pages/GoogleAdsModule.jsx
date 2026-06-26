@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ChevronDown, ChevronUp, RefreshCw, AlertTriangle, Copy, Check } from "lucide-react";
+import { Link } from "react-router-dom";
+import { ChevronDown, ChevronUp, RefreshCw, AlertTriangle, Copy, Check, SlidersHorizontal } from "lucide-react";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
 
 const BIDDING_LABELS = {
@@ -162,6 +163,10 @@ export default function GoogleAdsModule() {
           <h1 className="page-title">Google Ads</h1>
           <p className="page-subtitle">Dados reais da conta — conta 337-172-5537</p>
         </div>
+        <Link to="/google-ads/optimizations" className="btn btn-outline btn-sm">
+          <SlidersHorizontal size={14} style={{ marginRight: 6, verticalAlign: "-2px" }} />
+          Otimizações
+        </Link>
       </div>
 
       {error && (
