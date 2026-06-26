@@ -1260,7 +1260,11 @@ export default async function handler(req, res) {
       } catch (classifyErr) {
         console.error("Erro na classificação automática:", classifyErr);
       }
-
+try {
+        await notificarNovaMensagemWhatsApp({ db, phone, pushName, texto: messageDoc.text });
+      } catch (notifErr) {
+        console.error("Erro ao notificar push:", notifErr);
+      }
       try {
         const contact = await findContactByPhone(db, phone);
         const currentStatus = contact?.status || "";
