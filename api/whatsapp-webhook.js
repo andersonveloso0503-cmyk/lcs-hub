@@ -1193,6 +1193,7 @@ export default async function handler(req, res) {
         pushName,
         messageTimestamp,
         createdAt: serverTimestamp(),
+        lida: fromMe,
       };
     } else if (isImage) {
       const media = await fetchMediaBase64(data.key?.id);
@@ -1208,6 +1209,7 @@ export default async function handler(req, res) {
         pushName,
         messageTimestamp,
         createdAt: serverTimestamp(),
+        lida: fromMe,
       };
     } else if (isDocument) {
       const media = await fetchMediaBase64(data.key?.id);
@@ -1227,6 +1229,7 @@ export default async function handler(req, res) {
         pushName,
         messageTimestamp,
         createdAt: serverTimestamp(),
+        lida: fromMe,
       };
     } else {
       const text =
@@ -1241,6 +1244,7 @@ export default async function handler(req, res) {
         pushName,
         messageTimestamp,
         createdAt: serverTimestamp(),
+        lida: fromMe,
       };
     }
 
@@ -1260,7 +1264,7 @@ export default async function handler(req, res) {
       } catch (classifyErr) {
         console.error("Erro na classificação automática:", classifyErr);
       }
-try {
+      try {
         await notificarNovaMensagemWhatsApp({ db, phone, pushName, texto: messageDoc.text });
       } catch (notifErr) {
         console.error("Erro ao notificar push:", notifErr);
