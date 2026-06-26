@@ -100,6 +100,7 @@ async function fetchCampaigns(accessToken) {
       campaign.advertising_channel_type,
       campaign.start_date_time,
       campaign.bidding_strategy_type,
+      campaign_budget.resource_name,
       campaign_budget.amount_micros,
       metrics.impressions,
       metrics.clicks,
@@ -171,6 +172,7 @@ async function fetchCampaigns(accessToken) {
       bidding_strategy: c.biddingStrategyType,
       start_date: startDate,
       budget_amount: budgetMicros ? Number(budgetMicros) / 1_000_000 : 0,
+      budget_resource_name: row.campaignBudget?.resourceName || null,
       metrics: {
         impressions,
         clicks,
@@ -439,6 +441,96 @@ Só inclua termos onde a irrelevância é CLARA. Em caso de dúvida razoável so
   return { suggestions: enriched, analyzedCount: candidates.length };
 }
 
+/**
+ * Executa uma mutação genérica via GoogleAdsService.mutate — usada pelas 3
+ * ações da Fase 4 (negativar termo, pausar campanha, ajustar orçamento).
+ * Centralizar aqui evita repetir headers e tratamento de erro 3 vezes.
+ */
+async function runMutation(accessToken, path, body) {
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/${path}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Google Ads API retornou erro ${res.status}: ${text.slice(0, 500)}`);
+  }
+  return JSON.parse(text);
+}
+
+/**
+ * 4.1 — Adiciona um termo como palavra-chave negativa EXATA na campanha
+ * indicada. Usa match type EXACT (não BROAD nem PHRASE) deliberadamente:
+ * é a opção mais conservadora, bloqueando apenas buscas idênticas ao termo
+ * sugerido em vez de variações mais amplas que poderiam excluir tráfego bom
+ * por engano — adequado para uma ação que roda com aprovação humana, mas
+ * sem revisão linha a linha do match type escolhido.
+ */
+async function addNegativeKeyword(accessToken, campaignId, term) {
+  const campaignResourceName = `customers/${CUSTOMER_ID}/campaigns/${campaignId}`;
+  const body = {
+    operations: [
+      {
+        create: {
+          campaign: campaignResourceName,
+          negative: true,
+          keyword: { text: term, matchType: "EXACT" },
+        },
+      },
+    ],
+  };
+  return runMutation(accessToken, "campaignCriteria:mutate", body);
+}
+
+/**
+ * 4.2 — Pausa uma campanha (muda status para PAUSED). Reversível a
+ * qualquer momento direto na interface do Google Ads ou reativando por
+ * aqui no futuro — não há "exclusão" envolvida, é só uma alteração de
+ * status, a ação menos arriscada das três mutações de campanha.
+ */
+async function pauseCampaign(accessToken, campaignId) {
+  const campaignResourceName = `customers/${CUSTOMER_ID}/campaigns/${campaignId}`;
+  const body = {
+    operations: [
+      {
+        update: { resourceName: campaignResourceName, status: "PAUSED" },
+        updateMask: "status",
+      },
+    ],
+  };
+  return runMutation(accessToken, "campaigns:mutate", body);
+}
+
+/**
+ * 4.3 — Ajusta o orçamento diário de uma campanha. Recebe o valor em reais
+ * (não em micros) pra manter a interface do painel simples; a conversão
+ * pra micros (unidade exigida pela API) acontece aqui dentro.
+ *
+ * IMPORTANTE: o orçamento é um recurso PRÓPRIO (campaign_budget), separado
+ * da campanha — por isso a mutação aponta pro resource name do orçamento,
+ * obtido a partir do ID que já vem salvo no snapshot de cada campanha
+ * (campaign.budget_resource_name, adicionado no fetchCampaigns).
+ */
+async function updateCampaignBudget(accessToken, budgetResourceName, newAmountReais) {
+  const amountMicros = Math.round(newAmountReais * 1_000_000);
+  const body = {
+    operations: [
+      {
+        update: { resourceName: budgetResourceName, amountMicros: String(amountMicros) },
+        updateMask: "amount_micros",
+      },
+    ],
+  };
+  return runMutation(accessToken, "campaignBudgets:mutate", body);
+}
+
 export default async function handler(req, res) {
   // Aceita GET (cron job da Vercel) e POST (botão manual no painel).
   if (req.method !== "GET" && req.method !== "POST") {
@@ -460,6 +552,50 @@ export default async function handler(req, res) {
         "Credenciais da Google Ads API incompletas. Configure GOOGLE_ADS_CLIENT_ID, " +
         "GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_REFRESH_TOKEN e GOOGLE_ADS_DEVELOPER_TOKEN no Vercel.",
     });
+  }
+
+  // Fase 4 — ações de escrita (sempre disparadas manualmente pelo painel,
+  // nunca pelo cron). Cada uma exige um campo "action" específico no body
+  // e é executada de forma isolada: se der erro, retorna 500 sem tocar no
+  // snapshot do Firestore. Depois de qualquer mutação bem-sucedida, NÃO
+  // re-sincronizamos automaticamente — o usuário roda a sincronização de
+  // novo quando quiser ver o snapshot atualizado, mantendo o número de
+  // chamadas à API previsível.
+  const action = req.body?.action;
+  if (action === "add_negative_keyword" || action === "pause_campaign" || action === "update_budget") {
+    try {
+      const accessToken = await getAccessToken();
+
+      if (action === "add_negative_keyword") {
+        const { campaign_id, term } = req.body;
+        if (!campaign_id || !term) {
+          return res.status(400).json({ error: "campaign_id e term são obrigatórios." });
+        }
+        await addNegativeKeyword(accessToken, campaign_id, term);
+        return res.status(200).json({ ok: true, message: `Palavra negativa "${term}" adicionada.` });
+      }
+
+      if (action === "pause_campaign") {
+        const { campaign_id } = req.body;
+        if (!campaign_id) {
+          return res.status(400).json({ error: "campaign_id é obrigatório." });
+        }
+        await pauseCampaign(accessToken, campaign_id);
+        return res.status(200).json({ ok: true, message: "Campanha pausada." });
+      }
+
+      if (action === "update_budget") {
+        const { budget_resource_name, new_amount } = req.body;
+        if (!budget_resource_name || typeof new_amount !== "number" || new_amount <= 0) {
+          return res.status(400).json({ error: "budget_resource_name e new_amount (número > 0) são obrigatórios." });
+        }
+        await updateCampaignBudget(accessToken, budget_resource_name, new_amount);
+        return res.status(200).json({ ok: true, message: `Orçamento atualizado para R$ ${new_amount.toFixed(2)}/dia.` });
+      }
+    } catch (err) {
+      console.error(`Erro na ação "${action}":`, err.message);
+      return res.status(500).json({ error: err.message });
+    }
   }
 
   try {
