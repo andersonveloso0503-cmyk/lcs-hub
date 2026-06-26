@@ -287,6 +287,158 @@ function detectAlerts(oldCampaigns, newCampaigns) {
   return alerts;
 }
 
+/**
+ * Busca o Search Terms Report — os termos de pesquisa REAIS que dispararam
+ * seus anúncios nos últimos 30 dias, com suas métricas individuais.
+ * Diferente das "palavras-chave" que você configurou, isso mostra o que a
+ * pessoa de fato digitou no Google antes de ver o anúncio. É a partir
+ * desses termos que sugerimos palavras-chave negativas (termos irrelevantes
+ * que estão gastando orçamento sem gerar conversão).
+ *
+ * Filtra por LAST_30_DAYS e ordena por custo desc — termos que mais
+ * gastaram aparecem primeiro, já que são os candidatos mais relevantes a
+ * negativar se tiverem zero conversões.
+ */
+async function fetchSearchTerms(accessToken) {
+  const query = `
+    SELECT
+      search_term_view.search_term,
+      campaign.id,
+      campaign.name,
+      ad_group.id,
+      ad_group.name,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.cost_micros,
+      metrics.conversions
+    FROM search_term_view
+    WHERE segments.date DURING LAST_30_DAYS
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 500
+  `;
+
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Google Ads API (search terms) retornou erro ${res.status}: ${text.slice(0, 500)}`);
+  }
+
+  const batches = JSON.parse(text);
+  const rows = [];
+  for (const batch of batches) {
+    if (batch.results) rows.push(...batch.results);
+  }
+
+  return rows.map((row) => {
+    const term = row.searchTermView?.searchTerm || "";
+    const m = row.metrics || {};
+    const cost = Number(m.costMicros || 0) / 1_000_000;
+    return {
+      term,
+      campaign_id: row.campaign?.id,
+      campaign_name: row.campaign?.name,
+      ad_group_id: row.adGroup?.id,
+      ad_group_name: row.adGroup?.name,
+      impressions: Number(m.impressions || 0),
+      clicks: Number(m.clicks || 0),
+      cost,
+      conversions: Number(m.conversions || 0),
+    };
+  });
+}
+
+/**
+ * Usa Claude (Haiku, já que é uma análise de texto simples e barata) para
+ * avaliar quais termos de pesquisa são irrelevantes ao negócio da LCS
+ * (limpeza, portaria, facilities) e sugerir como palavras-chave negativas.
+ *
+ * Só envia pra análise os termos que JÁ gastaram dinheiro sem nenhuma
+ * conversão (cost > 0 e conversions === 0) — são os candidatos relevantes;
+ * termos que convertem não devem ser negativados mesmo que pareçam
+ * estranhos à primeira vista, e termos sem custo não merecem atenção.
+ */
+async function analyzeNegativeKeywords(searchTerms) {
+  const candidates = searchTerms
+    .filter((t) => t.cost > 0 && t.conversions === 0)
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 80); // limite pra manter o prompt enxuto e a resposta rápida
+
+  if (candidates.length === 0) {
+    return { suggestions: [], analyzedCount: 0 };
+  }
+
+  const termsList = candidates
+    .map((t) => `"${t.term}" — custo R$${t.cost.toFixed(2)}, ${t.clicks} cliques, campanha "${t.campaign_name}"`)
+    .join("\n");
+
+  const prompt = `Você é especialista em Google Ads para uma empresa brasileira de terceirização de serviços de limpeza, portaria e facilities (condomínios e empresas em Porto Alegre, RS).
+
+Abaixo está uma lista de termos de pesquisa reais que geraram cliques pagos nos últimos 30 dias SEM gerar nenhuma conversão. Analise cada termo e identifique quais são CLARAMENTE IRRELEVANTES ao negócio (ex: buscas por emprego/vagas quando a campanha não é de RH, produtos não relacionados, localização muito distante de Porto Alegre/RS, intenção de pesquisa claramente diferente do serviço anunciado).
+
+Termos:
+${termsList}
+
+Para cada termo que você recomenda negativar, responda em formato JSON (array), com este formato exato:
+[{"term": "termo exato", "reason": "motivo curto em português, máx 15 palavras", "confidence": "alta" | "media"}]
+
+Só inclua termos onde a irrelevância é CLARA. Em caso de dúvida razoável sobre a intenção de busca, não inclua. Responda APENAS o JSON, sem texto antes ou depois.`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 2000,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Erro na análise por IA: ${data.error?.message || res.status}`);
+  }
+
+  const text = data.content?.[0]?.text || "[]";
+  const cleaned = text.replace(/```json|```/g, "").trim();
+
+  let suggestions = [];
+  try {
+    suggestions = JSON.parse(cleaned);
+  } catch (e) {
+    console.error("Falha ao parsear resposta da IA como JSON:", cleaned.slice(0, 300));
+    suggestions = [];
+  }
+
+  // Enriquece cada sugestão com os dados originais do termo (custo,
+  // cliques, campanha) pra exibir no painel sem precisar cruzar de novo.
+  const byTerm = new Map(candidates.map((t) => [t.term, t]));
+  const enriched = suggestions
+    .map((s) => {
+      const original = byTerm.get(s.term);
+      if (!original) return null; // IA pode ter alterado levemente o texto; descarta se não achar match exato
+      return { ...s, ...original };
+    })
+    .filter(Boolean);
+
+  return { suggestions: enriched, analyzedCount: candidates.length };
+}
+
 export default async function handler(req, res) {
   // Aceita GET (cron job da Vercel) e POST (botão manual no painel).
   if (req.method !== "GET" && req.method !== "POST") {
@@ -321,13 +473,34 @@ export default async function handler(req, res) {
     const previousData = previousSnap.exists ? previousSnap.data() : null;
     const alerts = detectAlerts(previousData?.campaigns, campaigns);
 
+    // Análise de palavras-chave negativas é opcional e mais cara (chamada
+    // de IA) — só roda se ANTHROPIC_API_KEY estiver configurada, e qualquer
+    // falha nela não deve impedir o snapshot principal de ser salvo.
+    let negativeKeywordSuggestions = previousData?.negative_keyword_suggestions || [];
+    let negativeKeywordsCheckedAt = previousData?.negative_keywords_checked_at || null;
+    if (process.env.ANTHROPIC_API_KEY) {
+      try {
+        const searchTerms = await fetchSearchTerms(accessToken);
+        const analysis = await analyzeNegativeKeywords(searchTerms);
+        negativeKeywordSuggestions = analysis.suggestions;
+        negativeKeywordsCheckedAt = new Date().toISOString();
+        console.log(
+          `[google-ads] ${analysis.analyzedCount} termos sem conversão analisados, ${analysis.suggestions.length} sugestões de negativa`
+        );
+      } catch (err) {
+        console.error("Erro na análise de palavras-chave negativas (não bloqueia o snapshot):", err.message);
+      }
+    }
+
     await docRef.set({
       campaigns,
-      hasMetrics: false, // ainda sem custo/cliques/conversões — só estrutura
-      source: "google_ads_api", // diferencia do antigo "supermetrics" no histórico, se quiser checar depois
+      hasMetrics: true, // agora trazemos métricas reais de performance (últimos 30 dias)
+      source: "google_ads_api",
       updatedAt: new Date().toISOString(),
       alerts,
       alertsCheckedAt: new Date().toISOString(),
+      negative_keyword_suggestions: negativeKeywordSuggestions,
+      negative_keywords_checked_at: negativeKeywordsCheckedAt,
     });
 
     if (alerts.length > 0) {
@@ -338,7 +511,12 @@ export default async function handler(req, res) {
       await sendWhatsAppAlert(message);
     }
 
-    return res.status(200).json({ ok: true, count: campaigns.length, alerts });
+    return res.status(200).json({
+      ok: true,
+      count: campaigns.length,
+      alerts,
+      negative_keyword_suggestions: negativeKeywordSuggestions.length,
+    });
   } catch (err) {
     console.error("Erro ao buscar dados reais do Google Ads:", err);
     return res.status(500).json({ error: err.message });
