@@ -33,9 +33,11 @@ import {
   doc,
   getDoc,
   setDoc,
+  increment,
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
 import { detectStatusFromMessage, canAutoReclassify } from "./lib/classifyMessage.js";
+import { GoogleAuth } from "google-auth-library";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
