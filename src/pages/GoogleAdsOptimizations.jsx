@@ -17,6 +17,8 @@ import {
   Lock,
   Search,
 } from "lucide-react";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db } from "../firebase/config";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
 
 // Catálogo completo de otimizações no estilo GIO Brain. As 3 marcadas com
@@ -133,30 +135,52 @@ const OPTIMIZATIONS = [
   },
 ];
 
-const STORAGE_KEY = "lcs_ads_optimizations_config";
+const CONFIG_DOC_PATH = ["google_ads_config", "optimizations"];
 
-function loadConfig() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { enabled: {}, applyToAll: false, selectedCampaigns: [] };
-    return JSON.parse(raw);
-  } catch {
-    return { enabled: {}, applyToAll: false, selectedCampaigns: [] };
-  }
-}
+const DEFAULT_CONFIG = { enabled: {}, applyToAll: false, selectedCampaigns: [] };
 
 export default function GoogleAdsOptimizations() {
   const { campaigns, loading } = useGoogleAdsSnapshot();
-  const [config, setConfig] = useState(loadConfig);
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [search, setSearch] = useState("");
+  const [saveStatus, setSaveStatus] = useState(null); // null | "saving" | "saved" | "error"
 
-  // Persiste a configuração localmente — ela não dispara nenhuma execução
-  // automática por conta própria ainda (não há cron lendo essas flags);
-  // serve hoje como preferência salva para uso manual de cada otimização
-  // nas telas correspondentes, e como base para um automatismo futuro.
+  // Carrega a config salva no Firestore uma vez ao montar a tela. Esse
+  // mesmo documento é lido pelo cron automático (api/google-ads-fetch-real.js
+  // -> action: "run_auto_optimizations"), então qualquer mudança feita aqui
+  // já vale para a próxima execução automática, sem precisar de deploy.
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-  }, [config]);
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, ...CONFIG_DOC_PATH));
+        if (snap.exists()) setConfig({ ...DEFAULT_CONFIG, ...snap.data() });
+      } catch (err) {
+        console.error("Erro ao carregar config de otimizações:", err);
+      } finally {
+        setConfigLoaded(true);
+      }
+    })();
+  }, []);
+
+  // Salva no Firestore com debounce simples — evita escrever a cada
+  // toggle clicado em sequência rápida, sem precisar de um botão "Salvar"
+  // explícito (a experiência fica parecida com a do GIO Brain, onde o
+  // toggle já reflete o estado real).
+  useEffect(() => {
+    if (!configLoaded) return; // não salva o estado padrão antes de carregar o real
+    setSaveStatus("saving");
+    const timeout = setTimeout(async () => {
+      try {
+        await setDoc(doc(db, ...CONFIG_DOC_PATH), config);
+        setSaveStatus("saved");
+      } catch (err) {
+        console.error("Erro ao salvar config de otimizações:", err);
+        setSaveStatus("error");
+      }
+    }, 600);
+    return () => clearTimeout(timeout);
+  }, [config, configLoaded]);
 
   function toggleOptimization(id) {
     const opt = OPTIMIZATIONS.find((o) => o.id === id);
@@ -185,6 +209,40 @@ export default function GoogleAdsOptimizations() {
     setConfig((prev) => ({ ...prev, selectedCampaigns: [] }));
   }
 
+  const [running, setRunning] = useState(false);
+  const [runResult, setRunResult] = useState(null);
+
+  // Dispara a sincronização + otimizações automáticas imediatamente, sem
+  // esperar o cron diário (que roda 8h da manhã). Útil pra testar a
+  // configuração logo depois de mudá-la, ou pra forçar uma rodada extra.
+  //
+  // Esta chamada não envia a UPDATE_SECRET — em vez disso, o backend
+  // aceita uma chamada sem secret quando vier acompanhada do header
+  // x-panel-trigger com o valor fixo abaixo. Isso não substitui a
+  // proteção da UPDATE_SECRET para o cron e para chamadas externas; serve
+  // apenas para diferenciar "clique dentro do painel logado" de "chamada
+  // anônima pela internet" nesta ação específica. Quem consegue chegar
+  // até este botão já passou pelo login do painel (useAuth).
+  async function handleRunNow() {
+    if (!confirm("Sincronizar dados e aplicar as otimizações automáticas ativadas agora?")) return;
+    setRunning(true);
+    setRunResult(null);
+    try {
+      const res = await fetch("/api/google-ads-fetch-real", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-panel-trigger": "lcs-hub-optimizations-panel" },
+        body: JSON.stringify({ autoOptimize: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erro ao executar");
+      setRunResult({ ok: true, data: data.auto_optimize });
+    } catch (err) {
+      setRunResult({ ok: false, message: err.message });
+    } finally {
+      setRunning(false);
+    }
+  }
+
   const filteredCampaigns = campaigns.filter((c) =>
     c.name.toLowerCase().includes(search.toLowerCase())
   );
@@ -199,7 +257,66 @@ export default function GoogleAdsOptimizations() {
             Escolha quais otimizações ficam disponíveis e em quais campanhas aplicar
           </p>
         </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {saveStatus && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              {saveStatus === "saving" && "Salvando..."}
+              {saveStatus === "saved" && "✓ Salvo"}
+              {saveStatus === "error" && "Erro ao salvar"}
+            </span>
+          )}
+          <button className="btn btn-teal btn-sm" onClick={handleRunNow} disabled={running}>
+            {running ? "Executando..." : "▶ Rodar agora"}
+          </button>
+        </div>
       </div>
+
+      <p className="muted" style={{ fontSize: 12, marginTop: -10, marginBottom: 16 }}>
+        As otimizações ativadas abaixo rodam automaticamente todos os dias às 8h (horário de
+        Brasília), e também sempre que sincronizar manualmente nesta tela com o botão "Rodar agora".
+      </p>
+
+      {runResult && (
+        <div
+          className="pending-metrics-note"
+          style={
+            runResult.ok
+              ? { borderColor: "var(--teal)", background: "#ECFEFF" }
+              : { borderColor: "var(--pink)", background: "#FFF0F6" }
+          }
+        >
+          {runResult.ok ? (
+            <span>
+              {runResult.data?.skipped ? (
+                runResult.data.skipped
+              ) : runResult.data?.applied?.length > 0 ? (
+                <>
+                  <strong>{runResult.data.applied.length} otimização(ões) aplicada(s):</strong>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                    {runResult.data.applied.map((a, i) => (
+                      <li key={i} style={{ fontSize: 13 }}>
+                        {a.type === "pause_campaign" && `⏸ Pausada: "${a.campaign}" (score ${a.lcs_score})`}
+                        {a.type === "negative_keyword" && `🎯 Negativa: "${a.term}" em "${a.campaign}"`}
+                        {a.type === "budget_reduction" &&
+                          `💰 "${a.campaign}": R$${a.old_amount.toFixed(2)} → R$${a.new_amount.toFixed(2)}`}
+                      </li>
+                    ))}
+                  </ul>
+                  {runResult.data.errors?.length > 0 && (
+                    <p style={{ fontSize: 12, marginTop: 6, color: "var(--pink)" }}>
+                      {runResult.data.errors.length} ação(ões) falharam — veja os logs do servidor para detalhes.
+                    </p>
+                  )}
+                </>
+              ) : (
+                "Nenhuma otimização precisou ser aplicada agora."
+              )}
+            </span>
+          ) : (
+            <span>Erro: {runResult.message}</span>
+          )}
+        </div>
+      )}
 
       <div
         style={{
