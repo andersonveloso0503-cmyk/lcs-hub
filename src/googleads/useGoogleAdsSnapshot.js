@@ -18,6 +18,8 @@ export function useGoogleAdsSnapshot() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [hasMetrics, setHasMetrics] = useState(false);
   const [alerts, setAlerts] = useState([]);
+  const [negativeKeywordSuggestions, setNegativeKeywordSuggestions] = useState([]);
+  const [negativeKeywordsCheckedAt, setNegativeKeywordsCheckedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -32,11 +34,15 @@ export function useGoogleAdsSnapshot() {
           setLastUpdated(data.updatedAt || null);
           setHasMetrics(Boolean(data.hasMetrics));
           setAlerts(data.alerts || []);
+          setNegativeKeywordSuggestions(data.negative_keyword_suggestions || []);
+          setNegativeKeywordsCheckedAt(data.negative_keywords_checked_at || null);
         } else {
           setCampaigns([]);
           setLastUpdated(null);
           setHasMetrics(false);
           setAlerts([]);
+          setNegativeKeywordSuggestions([]);
+          setNegativeKeywordsCheckedAt(null);
         }
         setLoading(false);
       },
@@ -48,7 +54,16 @@ export function useGoogleAdsSnapshot() {
     return () => unsub();
   }, []);
 
-  return { campaigns, lastUpdated, hasMetrics, alerts, loading, error };
+  return {
+    campaigns,
+    lastUpdated,
+    hasMetrics,
+    alerts,
+    negativeKeywordSuggestions,
+    negativeKeywordsCheckedAt,
+    loading,
+    error,
+  };
 }
 
 /**
