@@ -129,25 +129,53 @@ export default function Inbox({ contacts, onCreateContact, onUpdateContactStatus
               <button
                 className="inbox-item"
                 onClick={() => handleSelectConversation(conv.phone)}
+                style={
+                  conv.unreadCount > 0
+                    ? { background: "#EAF3FB", borderLeft: "3px solid #185FA5" }
+                    : undefined
+                }
               >
                 <div className="inbox-avatar">
                   {(name || conv.phone).charAt(0).toUpperCase()}
                 </div>
                 <div className="inbox-item-body">
                   <div className="inbox-item-top">
-                    <span className="inbox-item-name">{name || `+${conv.phone}`}</span>
+                    <span
+                      className="inbox-item-name"
+                      style={conv.unreadCount > 0 ? { fontWeight: 700 } : undefined}
+                    >
+                      {name || `+${conv.phone}`}
+                    </span>
                     <span className="inbox-item-time">
                       {formatRelativeTime(conv.lastMessage?.messageTimestamp)}
                     </span>
                   </div>
-                  <div className="inbox-item-preview">
+                  <div
+                    className="inbox-item-preview"
+                    style={conv.unreadCount > 0 ? { fontWeight: 600, color: "#1a1d23" } : undefined}
+                  >
                     {conv.lastMessage?.fromMe && <span className="preview-you">Você: </span>}
                     {conv.lastMessage?.text}
                   </div>
+                  {conv.unreadCount > 0 && (
+                    <div
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 5,
+                        marginTop: 4,
+                        background: "#185FA5",
+                        color: "#fff",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        padding: "2px 9px",
+                        borderRadius: 20,
+                      }}
+                    >
+                      ● {conv.unreadCount} não lida{conv.unreadCount > 1 ? "s" : ""}
+                    </div>
+                  )}
                 </div>
-                {conv.unreadCount > 0 && (
-                  <span className="inbox-unread-badge">{conv.unreadCount}</span>
-                )}
               </button>
               <select
                 className={"inbox-status-select" + (currentStatus ? " status-" + currentStatus : "")}
