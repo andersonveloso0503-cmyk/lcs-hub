@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronUp, RefreshCw, AlertTriangle, Copy, Check, SlidersHorizontal } from "lucide-react";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
+import AdCreator from "../googleads/AdCreator";
+import KeywordSuggester from "../googleads/KeywordSuggester";
 
 const BIDDING_LABELS = {
   MAXIMIZE_CONVERSIONS: "Max. conversões",
@@ -30,6 +32,7 @@ export default function GoogleAdsModule() {
     alerts,
     negativeKeywordSuggestions,
     negativeKeywordsCheckedAt,
+    monthToDateSpend,
     loading,
     error,
   } = useGoogleAdsSnapshot();
@@ -194,6 +197,9 @@ export default function GoogleAdsModule() {
         </div>
       )}
 
+      {!loading && campaigns.length > 0 && <AdCreator campaigns={campaigns} />}
+      {!loading && campaigns.length > 0 && <KeywordSuggester campaigns={campaigns} />}
+
       {alerts && alerts.length > 0 && (
         <div className="pending-metrics-note" style={{ borderColor: "var(--pink)", background: "#FFF0F6" }}>
           <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--pink)" }} />
@@ -247,7 +253,17 @@ export default function GoogleAdsModule() {
           value={loading ? "—" : `R$ ${activeBudgetTotal.toFixed(2)}`}
           accent="pink"
         />
+        <StatCard
+          label="Gasto este mês"
+          value={loading ? "—" : monthToDateSpend !== null ? `R$ ${monthToDateSpend.toFixed(2)}` : "Indisponível"}
+          accent="blue"
+        />
       </div>
+      <p className="muted" style={{ fontSize: 11, marginTop: -8, marginBottom: 16 }}>
+        "Gasto este mês" é o total cobrado pelo Google desde o dia 1º deste mês. O Google Ads
+        não disponibiliza via API um campo de "saldo/crédito disponível" para contas com
+        pagamento automático por cartão — apenas o valor já gasto.
+      </p>
 
       {/* Sugestões de palavras-chave negativas — análise por IA dos termos
           de pesquisa reais que gastaram dinheiro sem converter nos últimos
