@@ -4,10 +4,6 @@ import { ChevronDown, ChevronUp, RefreshCw, AlertTriangle, Copy, Check, SlidersH
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "../firebase/config";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
-import AdCreator from "../googleads/AdCreator";
-import KeywordSuggester from "../googleads/KeywordSuggester";
-import BiddingStrategyCard from "../googleads/BiddingStrategyCard";
-import { HourlyBidCard, DeviceBidCard, GeoBidCard } from "../googleads/BidOptimizationCards";
 import ABTestCard from "../googleads/ABTestCard";
 
 const BIDDING_LABELS = {
@@ -52,51 +48,6 @@ export default function GoogleAdsModule() {
   const [actionLoading, setActionLoading] = useState(null); // id da ação em andamento, pra desabilitar só o botão certo
   const [actionFeedback, setActionFeedback] = useState(null); // { ok, message }
   const [budgetEdits, setBudgetEdits] = useState({}); // campaign_id -> valor digitado no input de orçamento
-
-  // Saldo estimado — não vem da API (confirmadamente não confiável, mesmo
-  // para contas pré-pagas, segundo fóruns/docs oficiais da Google Ads
-  // API). Em vez disso, o usuário registra periodicamente "tenho R$X
-  // hoje" e o sistema calcula o saldo estimado a partir daí, subtraindo o
-  // gasto acumulado desde a data do registro (usando month_to_date_spend).
-  // A estimativa só é confiável dentro do mesmo mês calendário do
-  // registro, já que month_to_date_spend reseta todo mês — fora disso,
-  // pedimos pro usuário registrar de novo.
-  const [balanceRef, setBalanceRef] = useState(null);
-  const [balanceInput, setBalanceInput] = useState("");
-  const [editingBalance, setEditingBalance] = useState(false);
-  const [savingBalance, setSavingBalance] = useState(false);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const snap = await getDoc(doc(db, "google_ads_config", "balance_reference"));
-        if (snap.exists()) setBalanceRef(snap.data());
-      } catch (err) {
-        console.error("Erro ao carregar referência de saldo:", err);
-      }
-    })();
-  }, []);
-
-  async function handleSaveBalance() {
-    const amount = parseFloat(balanceInput.replace(",", "."));
-    if (!amount || amount < 0) return;
-    setSavingBalance(true);
-    try {
-      const reference = {
-        amount,
-        date: new Date().toISOString(),
-        spend_at_reference: monthToDateSpend || 0, // ponto de partida do gasto acumulado no momento do registro
-      };
-      await setDoc(doc(db, "google_ads_config", "balance_reference"), reference);
-      setBalanceRef(reference);
-      setEditingBalance(false);
-      setBalanceInput("");
-    } catch (err) {
-      console.error("Erro ao salvar saldo:", err);
-    } finally {
-      setSavingBalance(false);
-    }
-  }
 
   // Chama o backend pra qualquer uma das 3 mutações da Fase 4. actionId é
   // só uma chave única (ex.: "pause-123") pra controlar qual botão mostra
@@ -163,6 +114,43 @@ export default function GoogleAdsModule() {
     });
   }
 
+  // Aplica a ação estruturada que vem dentro de uma recomendação da IA
+  // (recommendations[i].action). Reaproveita os mesmos 3 handlers que já
+  // existem para os botões manuais de cada campanha — a única diferença é
+  // que aqui o "campaign" completo precisa ser localizado a partir do
+  // campaign_id que a IA devolveu, já que a recomendação só carrega o ID,
+  // não o objeto completo da campanha (com budget_resource_name etc.).
+  async function handleApplyRecommendation(action) {
+    const campaign = campaigns.find((c) => c.campaign_id === action.campaign_id);
+    if (!campaign) {
+      setActionFeedback({ ok: false, message: "Campanha não encontrada — sincronize de novo e tente outra vez." });
+      return;
+    }
+
+    if (action.type === "pause_campaign") {
+      await handlePauseCampaign(campaign);
+    } else if (action.type === "update_budget") {
+      if (!campaign.budget_resource_name) {
+        setActionFeedback({ ok: false, message: "Esta campanha não tem orçamento próprio identificado." });
+        return;
+      }
+      if (!confirm(`Alterar orçamento diário de "${campaign.name}" de R$ ${campaign.budget_amount.toFixed(2)} para R$ ${action.new_amount.toFixed(2)}?`)) return;
+      await runAction(`rec-budget-${campaign.campaign_id}`, {
+        action: "update_budget",
+        budget_resource_name: campaign.budget_resource_name,
+        new_amount: action.new_amount,
+      });
+    } else if (action.type === "update_bidding_strategy") {
+      const label = action.strategy === "MAXIMIZE_CONVERSIONS" ? "Maximizar Conversões" : "Maximizar Cliques";
+      if (!confirm(`Mudar a estratégia de lance de "${campaign.name}" para ${label}?`)) return;
+      await runAction(`rec-bid-${campaign.campaign_id}`, {
+        action: "update_bidding_strategy",
+        campaign_id: campaign.campaign_id,
+        strategy: action.strategy,
+      });
+    }
+  }
+
   function handleCopy(term) {
     navigator.clipboard?.writeText(term);
     setCopiedTerm(term);
@@ -178,16 +166,6 @@ export default function GoogleAdsModule() {
   const activeCampaigns = campaigns.filter((c) => c.status === "ENABLED");
   const pausedCampaigns = campaigns.filter((c) => c.status !== "ENABLED");
   const activeBudgetTotal = activeCampaigns.reduce((sum, c) => sum + (c.budget_amount || 0), 0);
-
-  // Saldo estimado = valor registrado pelo usuário - (gasto acumulado
-  // agora - gasto acumulado no momento do registro). Só vale enquanto a
-  // referência for do mês corrente, já que month_to_date_spend reseta
-  // todo mês — referência de mês anterior fica "obsoleta" (balanceIsStale).
-  const balanceIsStale = balanceRef && new Date(balanceRef.date).getMonth() !== new Date().getMonth();
-  const estimatedBalance =
-    balanceRef && !balanceIsStale && typeof monthToDateSpend === "number"
-      ? Math.max(0, balanceRef.amount - (monthToDateSpend - (balanceRef.spend_at_reference || 0)))
-      : null;
 
   // Agregados gerais dos últimos 30 dias, somando todas as campanhas —
   // dá a visão de "conta toda" no topo, antes de entrar campanha a campanha.
@@ -261,12 +239,13 @@ export default function GoogleAdsModule() {
         </div>
       )}
 
-      {!loading && campaigns.length > 0 && <AdCreator campaigns={campaigns} />}
-      {!loading && campaigns.length > 0 && <KeywordSuggester campaigns={campaigns} />}
-      {!loading && <BiddingStrategyCard suggestions={biddingSuggestions} />}
-      {!loading && campaigns.length > 0 && <HourlyBidCard campaigns={campaigns} />}
-      {!loading && campaigns.length > 0 && <DeviceBidCard campaigns={campaigns} />}
-      {!loading && campaigns.length > 0 && <GeoBidCard campaigns={campaigns} />}
+      {/* As ações de Palavras Negativas, Pausar, Orçamento, Criar Anúncios,
+          Adição de Palavras, Estratégia de Lance, Horário, Dispositivo e
+          Geográfica agora são controladas só pelos toggles da tela
+          /google-ads/optimizations — sem cards de ação manual duplicados
+          aqui. Testes A/B continua com card próprio porque é
+          deliberadamente "manual only" (não tem toggle de automação, por
+          ativar anúncios reais imediatamente). */}
       {!loading && campaigns.length > 0 && <ABTestCard campaigns={campaigns} />}
 
       {alerts && alerts.length > 0 && (
@@ -374,10 +353,19 @@ export default function GoogleAdsModule() {
                 >
                   {(r.priority || "baixa").toUpperCase()}
                 </span>
-                <div>
+                <div style={{ flex: 1 }}>
                   <strong style={{ fontSize: 14 }}>{r.title}</strong>
                   <p className="muted" style={{ margin: "2px 0 0", fontSize: 13 }}>{r.detail}</p>
                 </div>
+                {r.action && (
+                  <button
+                    className="btn btn-teal btn-sm"
+                    onClick={() => handleApplyRecommendation(r.action)}
+                    style={{ alignSelf: "center", flexShrink: 0 }}
+                  >
+                    ✓ Aplicar
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -405,70 +393,16 @@ export default function GoogleAdsModule() {
         />
       </div>
 
-      {/* Saldo estimado — calculado a partir de um valor que o usuário
-          registra manualmente, já que o Google não expõe isso de forma
-          confiável via API (nem mesmo para contas pré-pagas). */}
-      <div className="card">
-        <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>💰 Saldo estimado</span>
-          {!editingBalance && (
-            <button className="btn btn-outline btn-sm" onClick={() => setEditingBalance(true)}>
-              {balanceRef ? "Atualizar saldo" : "Registrar saldo"}
-            </button>
-          )}
-        </div>
-
-        {editingBalance ? (
-          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 12 }}>
-            <span style={{ fontSize: 14 }}>R$</span>
-            <input
-              type="text"
-              autoFocus
-              placeholder="Ex: 350,00"
-              value={balanceInput}
-              onChange={(e) => setBalanceInput(e.target.value)}
-              style={{ width: 120, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--gray-light)" }}
-            />
-            <button className="btn btn-teal btn-sm" onClick={handleSaveBalance} disabled={savingBalance}>
-              {savingBalance ? "Salvando..." : "Salvar"}
-            </button>
-            <button className="btn btn-outline btn-sm" onClick={() => setEditingBalance(false)}>
-              Cancelar
-            </button>
-          </div>
-        ) : balanceRef ? (
-          <>
-            <div style={{ fontSize: 28, fontWeight: 800, marginTop: 8, color: estimatedBalance < 50 ? "var(--pink)" : "var(--teal)" }}>
-              {estimatedBalance !== null ? `R$ ${estimatedBalance.toFixed(2)}` : "—"}
-            </div>
-            <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              Estimado a partir de R$ {balanceRef.amount.toFixed(2)} registrado em{" "}
-              {new Date(balanceRef.date).toLocaleDateString("pt-BR")}, menos o gasto desde então.
-            </p>
-            {balanceIsStale && (
-              <p style={{ color: "var(--pink)", fontSize: 12, marginTop: 4 }}>
-                ⚠️ Esse registro é de um mês anterior — atualize o saldo para uma estimativa correta.
-              </p>
-            )}
-          </>
-        ) : (
-          <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
-            Registre quanto você tem hoje no Google Ads para ver uma estimativa de saldo restante
-            conforme o gasto avança. O Google não expõe esse valor de forma confiável via API.
-          </p>
-        )}
-
-        <p className="muted" style={{ fontSize: 11, marginTop: 12 }}>
-          <a
-            href="https://ads.google.com/aw/billing/summary"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "var(--blue)" }}
-          >
-            Ver saldo exato no Google Ads →
-          </a>
-        </p>
-      </div>
+      <p className="muted" style={{ fontSize: 12, marginTop: -8, marginBottom: 16 }}>
+        <a
+          href="https://ads.google.com/aw/billing/summary"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: "var(--blue)" }}
+        >
+          Ver saldo e faturamento no Google Ads →
+        </a>
+      </p>
 
       {/* Sugestões de palavras-chave negativas — análise por IA dos termos
           de pesquisa reais que gastaram dinheiro sem converter nos últimos
