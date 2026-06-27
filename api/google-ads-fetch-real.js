@@ -932,6 +932,36 @@ async function runAutoOptimizations(accessToken) {
     }
   }
 
+  // --- Criação de novos anúncios (sempre como PAUSADO) ---
+  // Diferente das outras ações, esta SEMPRE cria o anúncio pausado, nunca
+  // ativo — mesma regra de segurança do botão manual (AdCreator.jsx).
+  // O usuário precisa revisar visualmente no Google Ads e ativar, mesmo
+  // com a automação ligada; o "automático" aqui é só a geração + criação
+  // pausada, não a publicação ao vivo. Limite de 1 anúncio novo por
+  // campanha por execução, para não inflar o ad group rapidamente sem
+  // supervisão.
+  if (enabled.create_ads) {
+    const targetCampaigns = campaigns.filter((c) => c.status === "ENABLED" && inScope(c.campaign_id));
+    for (const c of targetCampaigns) {
+      try {
+        // Usa o nome da campanha como descrição do serviço, mesmo padrão
+        // já usado em "Adição de Palavras" automática.
+        const copy = await generateAdCopy(c.name, "https://www.lcsterceirizacaors.com.br");
+        const adGroup = await fetchFirstAdGroup(accessToken, c.campaign_id);
+        await createResponsiveSearchAd(
+          accessToken,
+          adGroup.id,
+          copy.headlines,
+          copy.descriptions,
+          "https://www.lcsterceirizacaors.com.br"
+        );
+        applied.push({ type: "create_ad", campaign: c.name, ad_group: adGroup.name });
+      } catch (err) {
+        errors.push({ type: "create_ad", campaign: c.name, message: err.message });
+      }
+    }
+  }
+
   return { applied, errors, skipped: null };
 }
 
@@ -977,6 +1007,102 @@ async function fetchMonthToDateSpend(accessToken) {
     }
   }
   return totalMicros / 1_000_000;
+}
+
+/**
+ * Busca cliques, impressões e custo SÓ DE HOJE (segments.date = TODAY),
+ * separado dos últimos 30 dias rolantes que fetchCampaigns usa. Útil pra
+ * acompanhar o ritmo do dia em andamento, sem esperar virar o período de
+ * 30 dias pra notar uma mudança brusca de tráfego.
+ */
+async function fetchTodayMetrics(accessToken) {
+  const query = `
+    SELECT metrics.clicks, metrics.impressions, metrics.cost_micros, metrics.conversions
+    FROM customer
+    WHERE segments.date DURING TODAY
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    console.error("Erro ao buscar métricas de hoje:", text.slice(0, 300));
+    return null;
+  }
+  const batches = JSON.parse(text);
+  const totals = { clicks: 0, impressions: 0, cost: 0, conversions: 0 };
+  for (const b of batches) {
+    for (const row of b.results || []) {
+      totals.clicks += Number(row.metrics?.clicks || 0);
+      totals.impressions += Number(row.metrics?.impressions || 0);
+      totals.cost += Number(row.metrics?.costMicros || 0) / 1_000_000;
+      totals.conversions += Number(row.metrics?.conversions || 0);
+    }
+  }
+  return totals;
+}
+
+/**
+ * Gera recomendações de melhoria em texto livre via IA, analisando o
+ * snapshot completo de campanhas (métricas reais + LCS Score). Diferente
+ * de um chat (que o usuário decidiu não querer), isso é uma lista fixa de
+ * sugestões, recalculada a cada sincronização e cacheada no snapshot —
+ * mesmo padrão das sugestões de palavras negativas.
+ */
+async function generateRecommendations(campaigns) {
+  const summaries = campaigns
+    .map((c) => {
+      const m = c.metrics || {};
+      return `- "${c.name}" (${c.status === "ENABLED" ? "ativa" : "pausada"}, ${c.campaign_type}): ${
+        m.clicks ?? 0
+      } cliques, CTR ${((m.ctr ?? 0) * 100).toFixed(2)}%, custo R$${(m.cost ?? 0).toFixed(2)}, ${
+        m.conversions ?? 0
+      } conversões, orçamento R$${(c.budget_amount ?? 0).toFixed(2)}/dia, LCS Score ${c.lcs_score ?? "—"}/10`;
+    })
+    .join("\n");
+
+  const prompt = `Você é consultor de Google Ads para a LCS Terceirização (limpeza, portaria, facilities em Porto Alegre, RS).
+
+Analise os dados reais das campanhas dos últimos 30 dias abaixo e gere até 6 recomendações práticas e específicas para melhorar performance, citando os números reais como justificativa. Priorize recomendações de maior impacto primeiro.
+
+CAMPANHAS:
+${summaries}
+
+Responda APENAS um JSON neste formato, sem texto antes ou depois:
+[{"title": "título curto (máx 8 palavras)", "detail": "explicação com números reais (máx 200 caracteres)", "priority": "alta" | "media" | "baixa"}]`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1200,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `Erro ${res.status} ao gerar recomendações`);
+
+  const text = data.content?.[0]?.text || "[]";
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    throw new Error("A IA retornou um formato inválido ao gerar recomendações.");
+  }
 }
 
 export default async function handler(req, res) {
@@ -1138,6 +1264,7 @@ export default async function handler(req, res) {
     const accessToken = await getAccessToken();
     const campaigns = await fetchCampaigns(accessToken);
     const monthToDateSpend = await fetchMonthToDateSpend(accessToken);
+    const todayMetrics = await fetchTodayMetrics(accessToken);
 
     const db = getAdminDb();
     const docRef = db.collection("google_ads_snapshot").doc("current");
@@ -1165,6 +1292,20 @@ export default async function handler(req, res) {
       }
     }
 
+    // Recomendações gerais de melhoria — mesmo padrão de cache das
+    // palavras negativas: gerado a cada sincronização, mas qualquer falha
+    // não bloqueia o snapshot principal.
+    let recommendations = previousData?.recommendations || [];
+    let recommendationsCheckedAt = previousData?.recommendations_checked_at || null;
+    if (process.env.ANTHROPIC_API_KEY && campaigns.length > 0) {
+      try {
+        recommendations = await generateRecommendations(campaigns);
+        recommendationsCheckedAt = new Date().toISOString();
+      } catch (err) {
+        console.error("Erro ao gerar recomendações (não bloqueia o snapshot):", err.message);
+      }
+    }
+
     await docRef.set({
       campaigns,
       hasMetrics: true, // agora trazemos métricas reais de performance (últimos 30 dias)
@@ -1175,6 +1316,9 @@ export default async function handler(req, res) {
       negative_keyword_suggestions: negativeKeywordSuggestions,
       negative_keywords_checked_at: negativeKeywordsCheckedAt,
       month_to_date_spend: monthToDateSpend, // null se a busca falhar — tratado como "indisponível" no frontend
+      today_metrics: todayMetrics, // null se a busca falhar
+      recommendations,
+      recommendations_checked_at: recommendationsCheckedAt,
     });
 
     if (alerts.length > 0) {
