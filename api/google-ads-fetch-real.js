@@ -698,7 +698,24 @@ async function updateBiddingStrategy(accessToken, campaignId, strategy) {
   const body = {
     operations: [{ update: campaignUpdate, updateMask }],
   };
-  return runMutation(accessToken, "campaigns:mutate", body);
+
+  try {
+    return await runMutation(accessToken, "campaigns:mutate", body);
+  } catch (err) {
+    // Campanhas com orçamento COMPARTILHADO (usado por mais de uma
+    // campanha) não podem trocar para uma estratégia de lance "standard"
+    // como Maximizar Conversões/Cliques — o Google exige criar uma
+    // "Portfolio Bidding Strategy" e aplicá-la a todas as campanhas que
+    // compartilham aquele orçamento. Isso não é um bug nosso, é uma regra
+    // de negócio real do Google Ads (confirmada na documentação oficial)
+    // — por isso convertemos pra uma mensagem clara em vez do erro técnico.
+    if (err.message.includes("BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET")) {
+      throw new Error(
+        "Esta campanha usa um orçamento COMPARTILHADO com outra(s) campanha(s). O Google não permite trocar a estratégia de lance nesse caso sem criar uma 'Estratégia de Lance de Portfólio' e aplicá-la a todas as campanhas que compartilham esse orçamento — isso precisa ser feito manualmente direto no Google Ads (Configurações → Estratégias de lance)."
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -1048,6 +1065,73 @@ async function fetchFirstAdGroup(accessToken, campaignId) {
   for (const b of batches) if (b.results) rows.push(...b.results);
   if (rows.length === 0) throw new Error("Nenhum grupo de anúncios ativo encontrado nesta campanha.");
   return { id: rows[0].adGroup.id, name: rows[0].adGroup.name };
+}
+
+/**
+ * Busca os anúncios reais (Responsive Search Ads) de uma campanha — texto
+ * completo de headlines e descriptions, além de métricas de performance e
+ * o campo ad_strength (avaliação própria do Google sobre a qualidade do
+ * anúncio: POOR / AVERAGE / GOOD / EXCELLENT). Usado para alimentar as
+ * recomendações de IA com dados de criativos, não só de campanha.
+ * Limitado aos anúncios ENABLED (anúncios pausados não geram tráfego
+ * atual, então não são relevantes para uma recomendação de melhoria).
+ */
+async function fetchAdsForCampaign(accessToken, campaignId) {
+  const query = `
+    SELECT
+      ad_group.id,
+      ad_group.name,
+      ad_group_ad.ad.id,
+      ad_group_ad.ad.responsive_search_ad.headlines,
+      ad_group_ad.ad.responsive_search_ad.descriptions,
+      ad_group_ad.ad_strength,
+      ad_group_ad.status,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.ctr,
+      metrics.conversions
+    FROM ad_group_ad
+    WHERE campaign.id = ${campaignId}
+      AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+      AND ad_group_ad.status = 'ENABLED'
+      AND segments.date DURING LAST_30_DAYS
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    console.error(`Erro ao buscar anúncios da campanha ${campaignId}:`, text.slice(0, 300));
+    return []; // não derruba a análise da campanha inteira por falha aqui
+  }
+  const batches = JSON.parse(text);
+  const rows = [];
+  for (const b of batches) if (b.results) rows.push(...b.results);
+
+  return rows.map((row) => {
+    const ad = row.adGroupAd?.ad || {};
+    const rsa = ad.responsiveSearchAd || {};
+    const m = row.metrics || {};
+    return {
+      ad_id: ad.id,
+      ad_group_name: row.adGroup?.name,
+      headlines: (rsa.headlines || []).map((h) => h.text),
+      descriptions: (rsa.descriptions || []).map((d) => d.text),
+      ad_strength: row.adGroupAd?.adStrength || "UNKNOWN",
+      impressions: Number(m.impressions || 0),
+      clicks: Number(m.clicks || 0),
+      ctr: Number(m.ctr || 0),
+      conversions: Number(m.conversions || 0),
+    };
+  });
 }
 
 /**
@@ -1578,7 +1662,7 @@ async function fetchTodayMetrics(accessToken) {
  * sugestões, recalculada a cada sincronização e cacheada no snapshot —
  * mesmo padrão das sugestões de palavras negativas.
  */
-async function generateRecommendations(campaigns) {
+async function generateRecommendations(campaigns, accessToken) {
   const summaries = campaigns
     .map((c) => {
       const m = c.metrics || {};
@@ -1590,14 +1674,46 @@ async function generateRecommendations(campaigns) {
     })
     .join("\n");
 
+  // Busca os anúncios reais (headlines/descriptions + Ad Strength do
+  // próprio Google) das campanhas ativas, para a IA também opinar sobre
+  // os criativos — não só sobre estrutura/orçamento da campanha. Limitado
+  // às campanhas ativas para não gastar chamadas com anúncios de
+  // campanhas já pausadas, que não estão gerando tráfego no momento.
+  let adsSummary = "Nenhum anúncio analisado (dados indisponíveis ou nenhuma campanha ativa).";
+  if (accessToken) {
+    try {
+      const activeCampaigns = campaigns.filter((c) => c.status === "ENABLED");
+      const adsByCampaign = await Promise.all(
+        activeCampaigns.map(async (c) => ({
+          campaign_name: c.name,
+          ads: await fetchAdsForCampaign(accessToken, c.campaign_id),
+        }))
+      );
+      const adsLines = [];
+      for (const { campaign_name, ads } of adsByCampaign) {
+        for (const ad of ads) {
+          adsLines.push(
+            `- Campanha "${campaign_name}", anúncio (grupo "${ad.ad_group_name}"): Ad Strength = ${ad.ad_strength}, ${ad.clicks} cliques, CTR ${(ad.ctr * 100).toFixed(2)}%, ${ad.conversions} conversões. Headlines: ${ad.headlines.slice(0, 5).join(" | ")}`
+          );
+        }
+      }
+      if (adsLines.length > 0) adsSummary = adsLines.join("\n");
+    } catch (err) {
+      console.error("Erro ao buscar anúncios para recomendações (segue sem essa parte):", err.message);
+    }
+  }
+
   const prompt = `Você é consultor de Google Ads para a LCS Terceirização (limpeza, portaria, facilities em Porto Alegre, RS).
 
-Analise os dados reais das campanhas dos últimos 30 dias abaixo e gere até 6 recomendações práticas e específicas para melhorar performance, citando os números reais como justificativa. Priorize recomendações de maior impacto primeiro.
+Analise os dados reais das campanhas E dos anúncios (criativos) dos últimos 30 dias abaixo, e gere até 8 recomendações práticas e específicas para melhorar performance, citando os números reais como justificativa. Priorize recomendações de maior impacto primeiro. Inclua tanto recomendações estruturais de campanha (orçamento, pausar, estratégia de lance) quanto recomendações sobre os criativos (Ad Strength baixo, headlines fracas, falta de variação) quando fizer sentido pelos dados.
 
 CAMPANHAS:
 ${summaries}
 
-Para cada recomendação, quando ela corresponder EXATAMENTE a uma das ações abaixo, preencha o campo "action" com os parâmetros certos. Se a recomendação não corresponder a nenhuma ação estruturada (ex: sugestão de copy, de extensão, ou algo qualitativo), deixe "action" como null — não invente uma ação que não se aplica.
+ANÚNCIOS (CRIATIVOS) DAS CAMPANHAS ATIVAS:
+${adsSummary}
+
+Para cada recomendação, quando ela corresponder EXATAMENTE a uma das ações abaixo, preencha o campo "action" com os parâmetros certos. Se a recomendação não corresponder a nenhuma ação estruturada (ex: sugestão de melhorar copy de um anúncio específico, ou algo qualitativo sobre os criativos), deixe "action" como null — não invente uma ação que não se aplica. Recomendações sobre Ad Strength baixo ou headlines fracas NÃO têm ação automática hoje (action: null) — o usuário usa o botão "Criar Anúncio com IA" manualmente para isso.
 
 AÇÕES DISPONÍVEIS:
 - pause_campaign: { type: "pause_campaign", campaign_id }
@@ -1724,7 +1840,7 @@ export default async function handler(req, res) {
         if (campaignsForRecs.length === 0) {
           return res.status(400).json({ error: "Nenhuma campanha no snapshot atual." });
         }
-        const newRecommendations = await generateRecommendations(campaignsForRecs);
+        const newRecommendations = await generateRecommendations(campaignsForRecs, accessToken);
         await docRef.update({
           recommendations: newRecommendations,
           recommendations_checked_at: new Date().toISOString(),
@@ -1956,7 +2072,7 @@ export default async function handler(req, res) {
     let recommendationsCheckedAt = previousData?.recommendations_checked_at || null;
     if (process.env.ANTHROPIC_API_KEY && campaigns.length > 0) {
       try {
-        recommendations = await generateRecommendations(campaigns);
+        recommendations = await generateRecommendations(campaigns, accessToken);
         recommendationsCheckedAt = new Date().toISOString();
       } catch (err) {
         console.error("Erro ao gerar recomendações (não bloqueia o snapshot):", err.message);
