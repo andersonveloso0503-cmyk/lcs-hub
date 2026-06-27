@@ -49,6 +49,7 @@ export default function GoogleAdsModule() {
   const [actionFeedback, setActionFeedback] = useState(null); // { ok, message }
   const [budgetEdits, setBudgetEdits] = useState({}); // campaign_id -> valor digitado no input de orçamento
   const [refreshingRecs, setRefreshingRecs] = useState(false);
+  const [appliedRecommendations, setAppliedRecommendations] = useState(new Set()); // índices das recomendações já aplicadas, somem da lista
 
   async function handleRefreshRecommendations() {
     setRefreshingRecs(true);
@@ -140,22 +141,27 @@ export default function GoogleAdsModule() {
   // que aqui o "campaign" completo precisa ser localizado a partir do
   // campaign_id que a IA devolveu, já que a recomendação só carrega o ID,
   // não o objeto completo da campanha (com budget_resource_name etc.).
-  async function handleApplyRecommendation(action) {
+  async function handleApplyRecommendation(action, index) {
     const campaign = campaigns.find((c) => c.campaign_id === action.campaign_id);
     if (!campaign) {
       setActionFeedback({ ok: false, message: "Campanha não encontrada — sincronize de novo e tente outra vez." });
       return;
     }
 
+    let ok = false;
     if (action.type === "pause_campaign") {
-      await handlePauseCampaign(campaign);
+      if (!confirm(`Pausar a campanha "${campaign.name}"? Ela para de gerar cliques e gastos imediatamente.`)) return;
+      ok = await runAction(`rec-pause-${campaign.campaign_id}`, {
+        action: "pause_campaign",
+        campaign_id: campaign.campaign_id,
+      });
     } else if (action.type === "update_budget") {
       if (!campaign.budget_resource_name) {
         setActionFeedback({ ok: false, message: "Esta campanha não tem orçamento próprio identificado." });
         return;
       }
       if (!confirm(`Alterar orçamento diário de "${campaign.name}" de R$ ${campaign.budget_amount.toFixed(2)} para R$ ${action.new_amount.toFixed(2)}?`)) return;
-      await runAction(`rec-budget-${campaign.campaign_id}`, {
+      ok = await runAction(`rec-budget-${campaign.campaign_id}`, {
         action: "update_budget",
         budget_resource_name: campaign.budget_resource_name,
         new_amount: action.new_amount,
@@ -163,12 +169,14 @@ export default function GoogleAdsModule() {
     } else if (action.type === "update_bidding_strategy") {
       const label = action.strategy === "MAXIMIZE_CONVERSIONS" ? "Maximizar Conversões" : "Maximizar Cliques";
       if (!confirm(`Mudar a estratégia de lance de "${campaign.name}" para ${label}?`)) return;
-      await runAction(`rec-bid-${campaign.campaign_id}`, {
+      ok = await runAction(`rec-bid-${campaign.campaign_id}`, {
         action: "update_bidding_strategy",
         campaign_id: campaign.campaign_id,
         strategy: action.strategy,
       });
     }
+
+    if (ok) setAppliedRecommendations((prev) => new Set(prev).add(index));
   }
 
   function handleCopy(term) {
@@ -339,7 +347,7 @@ export default function GoogleAdsModule() {
           nenhuma recomendação é aplicada automaticamente a partir daqui —
           as ações reais (pausar, negativar, orçamento, etc.) continuam
           nos próprios cards de cada uma, mais abaixo. */}
-      {recommendations.length > 0 && (
+      {recommendations.filter((_, i) => !appliedRecommendations.has(i)).length > 0 && (
         <div className="card">
           <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>💡 Recomendações da IA</span>
@@ -351,7 +359,9 @@ export default function GoogleAdsModule() {
             Baseadas nos dados reais das suas campanhas dos últimos 30 dias.
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {recommendations.map((r, i) => (
+            {recommendations.map((r, i) => {
+              if (appliedRecommendations.has(i)) return null; // já aplicada — some da lista
+              return (
               <div
                 key={i}
                 style={{
@@ -385,14 +395,15 @@ export default function GoogleAdsModule() {
                 {r.action && (
                   <button
                     className="btn btn-teal btn-sm"
-                    onClick={() => handleApplyRecommendation(r.action)}
+                    onClick={() => handleApplyRecommendation(r.action, i)}
                     style={{ alignSelf: "center", flexShrink: 0 }}
                   >
                     ✓ Aplicar
                   </button>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
           {recommendationsCheckedAt && (
             <p className="muted" style={{ marginTop: 10, fontSize: 12 }}>
