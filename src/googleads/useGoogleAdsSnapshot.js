@@ -18,6 +18,7 @@ export function useGoogleAdsSnapshot() {
   const [todayMetrics, setTodayMetrics] = useState(null);
   const [recommendations, setRecommendations] = useState([]);
   const [recommendationsCheckedAt, setRecommendationsCheckedAt] = useState(null);
+  const [biddingSuggestions, setBiddingSuggestions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -38,6 +39,7 @@ export function useGoogleAdsSnapshot() {
           setTodayMetrics(data.today_metrics || null);
           setRecommendations(data.recommendations || []);
           setRecommendationsCheckedAt(data.recommendations_checked_at || null);
+          setBiddingSuggestions(data.bidding_suggestions || []);
         } else {
           setCampaigns([]);
           setLastUpdated(null);
@@ -49,6 +51,7 @@ export function useGoogleAdsSnapshot() {
           setTodayMetrics(null);
           setRecommendations([]);
           setRecommendationsCheckedAt(null);
+          setBiddingSuggestions([]);
         }
         setLoading(false);
       },
@@ -71,6 +74,7 @@ export function useGoogleAdsSnapshot() {
     todayMetrics,
     recommendations,
     recommendationsCheckedAt,
+    biddingSuggestions,
     loading,
     error,
   };
