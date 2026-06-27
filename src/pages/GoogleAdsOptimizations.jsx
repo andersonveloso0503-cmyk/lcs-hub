@@ -67,8 +67,8 @@ const OPTIMIZATIONS = [
     id: "create_ads",
     icon: Sparkles,
     title: "Criar Anúncios",
-    description: "Cria novos anúncios com IA",
-    available: false,
+    description: "IA gera headlines e descrições para novos anúncios (publicados pausados)",
+    available: true,
   },
   {
     id: "create_ad_groups",
@@ -81,8 +81,8 @@ const OPTIMIZATIONS = [
     id: "add_keywords",
     icon: PlusCircle,
     title: "Adição de Palavras",
-    description: "Adiciona novas palavras-chave sugeridas",
-    available: false,
+    description: "IA sugere e adiciona novas palavras-chave relevantes",
+    available: true,
   },
   {
     id: "ab_tests",
@@ -297,6 +297,8 @@ export default function GoogleAdsOptimizations() {
                       <li key={i} style={{ fontSize: 13 }}>
                         {a.type === "pause_campaign" && `⏸ Pausada: "${a.campaign}" (score ${a.lcs_score})`}
                         {a.type === "negative_keyword" && `🎯 Negativa: "${a.term}" em "${a.campaign}"`}
+                        {a.type === "add_keyword" && `➕ Palavra-chave: "${a.term}" em "${a.campaign}"`}
+                        {a.type === "create_ad" && `✨ Anúncio criado (pausado) em "${a.campaign}" / "${a.ad_group}"`}
                         {a.type === "budget_reduction" &&
                           `💰 "${a.campaign}": R$${a.old_amount.toFixed(2)} → R$${a.new_amount.toFixed(2)}`}
                       </li>

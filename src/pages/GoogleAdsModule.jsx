@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronUp, RefreshCw, AlertTriangle, Copy, Check, SlidersHorizontal } from "lucide-react";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db } from "../firebase/config";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
 import AdCreator from "../googleads/AdCreator";
 import KeywordSuggester from "../googleads/KeywordSuggester";
@@ -33,6 +35,9 @@ export default function GoogleAdsModule() {
     negativeKeywordSuggestions,
     negativeKeywordsCheckedAt,
     monthToDateSpend,
+    todayMetrics,
+    recommendations,
+    recommendationsCheckedAt,
     loading,
     error,
   } = useGoogleAdsSnapshot();
@@ -43,6 +48,51 @@ export default function GoogleAdsModule() {
   const [actionLoading, setActionLoading] = useState(null); // id da ação em andamento, pra desabilitar só o botão certo
   const [actionFeedback, setActionFeedback] = useState(null); // { ok, message }
   const [budgetEdits, setBudgetEdits] = useState({}); // campaign_id -> valor digitado no input de orçamento
+
+  // Saldo estimado — não vem da API (confirmadamente não confiável, mesmo
+  // para contas pré-pagas, segundo fóruns/docs oficiais da Google Ads
+  // API). Em vez disso, o usuário registra periodicamente "tenho R$X
+  // hoje" e o sistema calcula o saldo estimado a partir daí, subtraindo o
+  // gasto acumulado desde a data do registro (usando month_to_date_spend).
+  // A estimativa só é confiável dentro do mesmo mês calendário do
+  // registro, já que month_to_date_spend reseta todo mês — fora disso,
+  // pedimos pro usuário registrar de novo.
+  const [balanceRef, setBalanceRef] = useState(null);
+  const [balanceInput, setBalanceInput] = useState("");
+  const [editingBalance, setEditingBalance] = useState(false);
+  const [savingBalance, setSavingBalance] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, "google_ads_config", "balance_reference"));
+        if (snap.exists()) setBalanceRef(snap.data());
+      } catch (err) {
+        console.error("Erro ao carregar referência de saldo:", err);
+      }
+    })();
+  }, []);
+
+  async function handleSaveBalance() {
+    const amount = parseFloat(balanceInput.replace(",", "."));
+    if (!amount || amount < 0) return;
+    setSavingBalance(true);
+    try {
+      const reference = {
+        amount,
+        date: new Date().toISOString(),
+        spend_at_reference: monthToDateSpend || 0, // ponto de partida do gasto acumulado no momento do registro
+      };
+      await setDoc(doc(db, "google_ads_config", "balance_reference"), reference);
+      setBalanceRef(reference);
+      setEditingBalance(false);
+      setBalanceInput("");
+    } catch (err) {
+      console.error("Erro ao salvar saldo:", err);
+    } finally {
+      setSavingBalance(false);
+    }
+  }
 
   // Chama o backend pra qualquer uma das 3 mutações da Fase 4. actionId é
   // só uma chave única (ex.: "pause-123") pra controlar qual botão mostra
@@ -124,6 +174,16 @@ export default function GoogleAdsModule() {
   const activeCampaigns = campaigns.filter((c) => c.status === "ENABLED");
   const pausedCampaigns = campaigns.filter((c) => c.status !== "ENABLED");
   const activeBudgetTotal = activeCampaigns.reduce((sum, c) => sum + (c.budget_amount || 0), 0);
+
+  // Saldo estimado = valor registrado pelo usuário - (gasto acumulado
+  // agora - gasto acumulado no momento do registro). Só vale enquanto a
+  // referência for do mês corrente, já que month_to_date_spend reseta
+  // todo mês — referência de mês anterior fica "obsoleta" (balanceIsStale).
+  const balanceIsStale = balanceRef && new Date(balanceRef.date).getMonth() !== new Date().getMonth();
+  const estimatedBalance =
+    balanceRef && !balanceIsStale && typeof monthToDateSpend === "number"
+      ? Math.max(0, balanceRef.amount - (monthToDateSpend - (balanceRef.spend_at_reference || 0)))
+      : null;
 
   // Agregados gerais dos últimos 30 dias, somando todas as campanhas —
   // dá a visão de "conta toda" no topo, antes de entrar campanha a campanha.
@@ -244,6 +304,82 @@ export default function GoogleAdsModule() {
         </div>
       )}
 
+      {/* Métricas de hoje — separadas dos últimos 30 dias rolantes, pra
+          dar visibilidade do ritmo do dia em andamento sem esperar o
+          período de 30 dias acumular a mudança. */}
+      {todayMetrics && (
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div className="card-title" style={{ marginBottom: 2 }}>📅 Hoje</div>
+            <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+              Métricas acumuladas só do dia de hoje (horário de Brasília), atualizado na última
+              sincronização.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+            <MiniStat label="Cliques hoje" value={todayMetrics.clicks.toLocaleString("pt-BR")} />
+            <MiniStat label="Impressões hoje" value={todayMetrics.impressions.toLocaleString("pt-BR")} />
+            <MiniStat label="Conversões hoje" value={todayMetrics.conversions.toFixed(0)} />
+            <MiniStat label="Custo hoje" value={`R$ ${todayMetrics.cost.toFixed(2)}`} />
+          </div>
+        </div>
+      )}
+
+      {/* Recomendações de melhoria via IA — analisa o snapshot completo
+          (métricas reais + LCS Score) e gera sugestões específicas,
+          recalculadas a cada sincronização. Conteúdo informativo apenas;
+          nenhuma recomendação é aplicada automaticamente a partir daqui —
+          as ações reais (pausar, negativar, orçamento, etc.) continuam
+          nos próprios cards de cada uma, mais abaixo. */}
+      {recommendations.length > 0 && (
+        <div className="card">
+          <div className="card-title">💡 Recomendações da IA</div>
+          <p className="muted" style={{ marginTop: 4, marginBottom: 14, fontSize: 13 }}>
+            Baseadas nos dados reais das suas campanhas dos últimos 30 dias.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {recommendations.map((r, i) => (
+              <div
+                key={i}
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  padding: "12px 14px",
+                  borderRadius: 10,
+                  background: "var(--bg)",
+                  border: "1px solid var(--gray-light)",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    padding: "3px 8px",
+                    borderRadius: 8,
+                    color: "#fff",
+                    height: "fit-content",
+                    whiteSpace: "nowrap",
+                    background:
+                      r.priority === "alta" ? "#C62828" : r.priority === "media" ? "#B8860B" : "var(--gray)",
+                  }}
+                >
+                  {(r.priority || "baixa").toUpperCase()}
+                </span>
+                <div>
+                  <strong style={{ fontSize: 14 }}>{r.title}</strong>
+                  <p className="muted" style={{ margin: "2px 0 0", fontSize: 13 }}>{r.detail}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          {recommendationsCheckedAt && (
+            <p className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+              Geradas em: {new Date(recommendationsCheckedAt).toLocaleString("pt-BR")}
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="stat-grid">
         <StatCard label="Total de campanhas" value={loading ? "—" : campaigns.length} accent="blue" />
         <StatCard label="Ativas" value={loading ? "—" : activeCampaigns.length} accent="teal" />
@@ -259,11 +395,71 @@ export default function GoogleAdsModule() {
           accent="blue"
         />
       </div>
-      <p className="muted" style={{ fontSize: 11, marginTop: -8, marginBottom: 16 }}>
-        "Gasto este mês" é o total cobrado pelo Google desde o dia 1º deste mês. O Google Ads
-        não disponibiliza via API um campo de "saldo/crédito disponível" para contas com
-        pagamento automático por cartão — apenas o valor já gasto.
-      </p>
+
+      {/* Saldo estimado — calculado a partir de um valor que o usuário
+          registra manualmente, já que o Google não expõe isso de forma
+          confiável via API (nem mesmo para contas pré-pagas). */}
+      <div className="card">
+        <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>💰 Saldo estimado</span>
+          {!editingBalance && (
+            <button className="btn btn-outline btn-sm" onClick={() => setEditingBalance(true)}>
+              {balanceRef ? "Atualizar saldo" : "Registrar saldo"}
+            </button>
+          )}
+        </div>
+
+        {editingBalance ? (
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 12 }}>
+            <span style={{ fontSize: 14 }}>R$</span>
+            <input
+              type="text"
+              autoFocus
+              placeholder="Ex: 350,00"
+              value={balanceInput}
+              onChange={(e) => setBalanceInput(e.target.value)}
+              style={{ width: 120, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--gray-light)" }}
+            />
+            <button className="btn btn-teal btn-sm" onClick={handleSaveBalance} disabled={savingBalance}>
+              {savingBalance ? "Salvando..." : "Salvar"}
+            </button>
+            <button className="btn btn-outline btn-sm" onClick={() => setEditingBalance(false)}>
+              Cancelar
+            </button>
+          </div>
+        ) : balanceRef ? (
+          <>
+            <div style={{ fontSize: 28, fontWeight: 800, marginTop: 8, color: estimatedBalance < 50 ? "var(--pink)" : "var(--teal)" }}>
+              {estimatedBalance !== null ? `R$ ${estimatedBalance.toFixed(2)}` : "—"}
+            </div>
+            <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              Estimado a partir de R$ {balanceRef.amount.toFixed(2)} registrado em{" "}
+              {new Date(balanceRef.date).toLocaleDateString("pt-BR")}, menos o gasto desde então.
+            </p>
+            {balanceIsStale && (
+              <p style={{ color: "var(--pink)", fontSize: 12, marginTop: 4 }}>
+                ⚠️ Esse registro é de um mês anterior — atualize o saldo para uma estimativa correta.
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
+            Registre quanto você tem hoje no Google Ads para ver uma estimativa de saldo restante
+            conforme o gasto avança. O Google não expõe esse valor de forma confiável via API.
+          </p>
+        )}
+
+        <p className="muted" style={{ fontSize: 11, marginTop: 12 }}>
+          <a
+            href="https://ads.google.com/aw/billing/summary"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--blue)" }}
+          >
+            Ver saldo exato no Google Ads →
+          </a>
+        </p>
+      </div>
 
       {/* Sugestões de palavras-chave negativas — análise por IA dos termos
           de pesquisa reais que gastaram dinheiro sem converter nos últimos
