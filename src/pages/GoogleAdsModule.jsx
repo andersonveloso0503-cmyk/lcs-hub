@@ -6,6 +6,9 @@ import { db } from "../firebase/config";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
 import AdCreator from "../googleads/AdCreator";
 import KeywordSuggester from "../googleads/KeywordSuggester";
+import BiddingStrategyCard from "../googleads/BiddingStrategyCard";
+import { HourlyBidCard, DeviceBidCard, GeoBidCard } from "../googleads/BidOptimizationCards";
+import ABTestCard from "../googleads/ABTestCard";
 
 const BIDDING_LABELS = {
   MAXIMIZE_CONVERSIONS: "Max. conversões",
@@ -38,6 +41,7 @@ export default function GoogleAdsModule() {
     todayMetrics,
     recommendations,
     recommendationsCheckedAt,
+    biddingSuggestions,
     loading,
     error,
   } = useGoogleAdsSnapshot();
@@ -259,6 +263,11 @@ export default function GoogleAdsModule() {
 
       {!loading && campaigns.length > 0 && <AdCreator campaigns={campaigns} />}
       {!loading && campaigns.length > 0 && <KeywordSuggester campaigns={campaigns} />}
+      {!loading && <BiddingStrategyCard suggestions={biddingSuggestions} />}
+      {!loading && campaigns.length > 0 && <HourlyBidCard campaigns={campaigns} />}
+      {!loading && campaigns.length > 0 && <DeviceBidCard campaigns={campaigns} />}
+      {!loading && campaigns.length > 0 && <GeoBidCard campaigns={campaigns} />}
+      {!loading && campaigns.length > 0 && <ABTestCard campaigns={campaigns} />}
 
       {alerts && alerts.length > 0 && (
         <div className="pending-metrics-note" style={{ borderColor: "var(--pink)", background: "#FFF0F6" }}>

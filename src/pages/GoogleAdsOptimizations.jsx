@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import {
   SlidersHorizontal,
-  TrendingUp,
   Sparkles,
   Layers,
   Ban,
@@ -53,15 +52,8 @@ const OPTIMIZATIONS = [
     id: "bid_strategy",
     icon: SlidersHorizontal,
     title: "Estratégia de Lance",
-    description: "Altera a estratégia de lance da campanha",
-    available: false,
-  },
-  {
-    id: "adjust_bids",
-    icon: TrendingUp,
-    title: "Ajustar Lances",
-    description: "Ajusta valores dos lances automaticamente",
-    available: false,
+    description: "Sugere Maximizar Conversões ou Maximizar Cliques conforme volume de dados",
+    available: true,
   },
   {
     id: "create_ads",
@@ -88,29 +80,23 @@ const OPTIMIZATIONS = [
     id: "ab_tests",
     icon: FlaskConical,
     title: "Testes A/B",
-    description: "Executa testes A/B entre variações de anúncios",
-    available: false,
-  },
-  {
-    id: "scheduled_optimization",
-    icon: Clock,
-    title: "Otimização Agendada",
-    description: "Agenda otimizações automaticamente em horários fixos",
-    available: false,
+    description: "Cria 2 anúncios com ângulos diferentes — disponível só manualmente, por afetar a conta ao vivo",
+    available: true,
+    manualOnly: true,
   },
   {
     id: "geo_optimization",
     icon: Globe,
     title: "Otimização Geográfica",
-    description: "Otimiza performance por localização geográfica",
-    available: false,
+    description: "Reduz lance fora de Porto Alegre e região metropolitana",
+    available: true,
   },
   {
     id: "device_optimization",
     icon: Monitor,
     title: "Otimização por Dispositivo",
-    description: "Otimiza lances e segmentação por dispositivo",
-    available: false,
+    description: "Ajusta lances comparando performance mobile vs desktop",
+    available: true,
   },
   {
     id: "demographic_optimization",
@@ -120,11 +106,11 @@ const OPTIMIZATIONS = [
     available: false,
   },
   {
-    id: "schedule_optimization",
+    id: "hourly_optimization",
     icon: Clock,
     title: "Otimização por Horário",
-    description: "Otimiza horários de melhor performance",
-    available: false,
+    description: "Ajusta lances por faixa horária baseado na taxa de conversão real",
+    available: true,
   },
   {
     id: "extension_optimization",
@@ -299,6 +285,10 @@ export default function GoogleAdsOptimizations() {
                         {a.type === "negative_keyword" && `🎯 Negativa: "${a.term}" em "${a.campaign}"`}
                         {a.type === "add_keyword" && `➕ Palavra-chave: "${a.term}" em "${a.campaign}"`}
                         {a.type === "create_ad" && `✨ Anúncio criado (pausado) em "${a.campaign}" / "${a.ad_group}"`}
+                        {a.type === "bidding_strategy" && `🎯 Lance: "${a.campaign}" mudou de ${a.from} para ${a.to}`}
+                        {a.type === "hourly_bid" && `⏰ "${a.campaign}": lance ${a.hour}h ajustado (${((a.bid_modifier - 1) * 100).toFixed(0)}%)`}
+                        {a.type === "device_bid" && `📱 "${a.campaign}": lance ${a.device} ajustado (${((a.bid_modifier - 1) * 100).toFixed(0)}%)`}
+                        {a.type === "geo_bid" && `📍 "${a.campaign}": lance reduzido fora da região (R$${a.cost?.toFixed(2)} sem conversão)`}
                         {a.type === "budget_reduction" &&
                           `💰 "${a.campaign}": R$${a.old_amount.toFixed(2)} → R$${a.new_amount.toFixed(2)}`}
                       </li>
@@ -486,7 +476,7 @@ export default function GoogleAdsOptimizations() {
 }
 
 function OptimizationCard({ optimization, enabled, onToggle }) {
-  const { icon: Icon, title, description, available } = optimization;
+  const { icon: Icon, title, description, available, manualOnly } = optimization;
   return (
     <div
       className="card"
@@ -511,7 +501,21 @@ function OptimizationCard({ optimization, enabled, onToggle }) {
         >
           <Icon size={17} color={enabled && available ? "var(--teal)" : "var(--gray)"} />
         </div>
-        {available ? (
+        {manualOnly ? (
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              padding: "3px 8px",
+              borderRadius: 10,
+              background: "var(--blue)",
+              color: "#fff",
+            }}
+            title="Disponível só no botão manual, dentro do card próprio — não entra na automação por afetar a conta ao vivo"
+          >
+            MANUAL
+          </span>
+        ) : available ? (
           <ToggleSwitch checked={enabled} onChange={onToggle} />
         ) : (
           <span
