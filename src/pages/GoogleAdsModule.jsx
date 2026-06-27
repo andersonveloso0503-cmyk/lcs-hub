@@ -48,6 +48,26 @@ export default function GoogleAdsModule() {
   const [actionLoading, setActionLoading] = useState(null); // id da ação em andamento, pra desabilitar só o botão certo
   const [actionFeedback, setActionFeedback] = useState(null); // { ok, message }
   const [budgetEdits, setBudgetEdits] = useState({}); // campaign_id -> valor digitado no input de orçamento
+  const [refreshingRecs, setRefreshingRecs] = useState(false);
+
+  async function handleRefreshRecommendations() {
+    setRefreshingRecs(true);
+    setActionFeedback(null);
+    try {
+      const res = await fetch("/api/google-ads-fetch-real", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-panel-trigger": "lcs-hub-optimizations-panel" },
+        body: JSON.stringify({ action: "refresh_recommendations" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erro ao atualizar recomendações");
+      setActionFeedback({ ok: true, message: "Recomendações atualizadas." });
+    } catch (err) {
+      setActionFeedback({ ok: false, message: err.message });
+    } finally {
+      setRefreshingRecs(false);
+    }
+  }
 
   // Chama o backend pra qualquer uma das 3 mutações da Fase 4. actionId é
   // só uma chave única (ex.: "pause-123") pra controlar qual botão mostra
@@ -321,7 +341,12 @@ export default function GoogleAdsModule() {
           nos próprios cards de cada uma, mais abaixo. */}
       {recommendations.length > 0 && (
         <div className="card">
-          <div className="card-title">💡 Recomendações da IA</div>
+          <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>💡 Recomendações da IA</span>
+            <button className="btn btn-outline btn-sm" onClick={handleRefreshRecommendations} disabled={refreshingRecs}>
+              {refreshingRecs ? "Atualizando..." : "🔄 Atualizar"}
+            </button>
+          </div>
           <p className="muted" style={{ marginTop: 4, marginBottom: 14, fontSize: 13 }}>
             Baseadas nos dados reais das suas campanhas dos últimos 30 dias.
           </p>
