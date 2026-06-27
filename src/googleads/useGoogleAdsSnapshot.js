@@ -15,6 +15,9 @@ export function useGoogleAdsSnapshot() {
   const [negativeKeywordSuggestions, setNegativeKeywordSuggestions] = useState([]);
   const [negativeKeywordsCheckedAt, setNegativeKeywordsCheckedAt] = useState(null);
   const [monthToDateSpend, setMonthToDateSpend] = useState(null);
+  const [todayMetrics, setTodayMetrics] = useState(null);
+  const [recommendations, setRecommendations] = useState([]);
+  const [recommendationsCheckedAt, setRecommendationsCheckedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -32,6 +35,9 @@ export function useGoogleAdsSnapshot() {
           setNegativeKeywordSuggestions(data.negative_keyword_suggestions || []);
           setNegativeKeywordsCheckedAt(data.negative_keywords_checked_at || null);
           setMonthToDateSpend(typeof data.month_to_date_spend === "number" ? data.month_to_date_spend : null);
+          setTodayMetrics(data.today_metrics || null);
+          setRecommendations(data.recommendations || []);
+          setRecommendationsCheckedAt(data.recommendations_checked_at || null);
         } else {
           setCampaigns([]);
           setLastUpdated(null);
@@ -40,6 +46,9 @@ export function useGoogleAdsSnapshot() {
           setNegativeKeywordSuggestions([]);
           setNegativeKeywordsCheckedAt(null);
           setMonthToDateSpend(null);
+          setTodayMetrics(null);
+          setRecommendations([]);
+          setRecommendationsCheckedAt(null);
         }
         setLoading(false);
       },
@@ -59,6 +68,9 @@ export function useGoogleAdsSnapshot() {
     negativeKeywordSuggestions,
     negativeKeywordsCheckedAt,
     monthToDateSpend,
+    todayMetrics,
+    recommendations,
+    recommendationsCheckedAt,
     loading,
     error,
   };
