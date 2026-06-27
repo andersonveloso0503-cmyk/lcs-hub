@@ -1693,10 +1693,39 @@ export default async function handler(req, res) {
     action === "apply_device_bid" ||
     action === "suggest_geo_bids" ||
     action === "apply_geo_bid" ||
-    action === "create_ab_test"
+    action === "create_ab_test" ||
+    action === "refresh_recommendations"
   ) {
     try {
       const accessToken = await getAccessToken();
+
+      if (action === "refresh_recommendations") {
+        // Recalcula só as recomendações da IA, sem rodar mais nada (sem
+        // sincronizar campanhas de novo, sem disparar otimizações
+        // automáticas) — usa o snapshot de campanhas que JÁ está salvo,
+        // pra ser uma ação rápida e isolada quando o usuário só quer ver
+        // sugestões novas sem esperar o ciclo normal de sincronização.
+        if (!process.env.ANTHROPIC_API_KEY) {
+          return res.status(500).json({ error: "ANTHROPIC_API_KEY não configurada." });
+        }
+        const db = getAdminDb();
+        const docRef = db.collection("google_ads_snapshot").doc("current");
+        const snap = await docRef.get();
+        if (!snap.exists) {
+          return res.status(400).json({ error: "Nenhum snapshot de campanhas encontrado. Sincronize primeiro." });
+        }
+        const snapshotData = snap.data();
+        const campaignsForRecs = snapshotData.campaigns || [];
+        if (campaignsForRecs.length === 0) {
+          return res.status(400).json({ error: "Nenhuma campanha no snapshot atual." });
+        }
+        const newRecommendations = await generateRecommendations(campaignsForRecs);
+        await docRef.update({
+          recommendations: newRecommendations,
+          recommendations_checked_at: new Date().toISOString(),
+        });
+        return res.status(200).json({ ok: true, recommendations: newRecommendations });
+      }
 
       if (action === "create_ab_test") {
         const { campaign_id, service_label } = req.body;
