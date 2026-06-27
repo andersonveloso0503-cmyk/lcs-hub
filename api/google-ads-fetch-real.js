@@ -643,6 +643,373 @@ async function updateCampaignBudget(accessToken, budgetResourceName, newAmountRe
 }
 
 /**
+ * 4.6 — Sugere a estratégia de lance mais adequada baseada no volume de
+ * conversões da campanha no período (regra fixa, combinada com o
+ * usuário, não decidida livremente pela IA): poucas conversões (<5) ainda
+ * não dão sinal suficiente para o algoritmo do Google otimizar por
+ * conversão, então Maximizar Cliques (TARGET_SPEND) gera mais volume de
+ * tráfego para acumular dados; 5+ conversões já permitem Maximizar
+ * Conversões (MAXIMIZE_CONVERSIONS) com segurança.
+ */
+function suggestBiddingStrategy(campaign) {
+  const conversions = campaign.metrics?.conversions || 0;
+  const current = campaign.bidding_strategy;
+  const suggested = conversions >= 5 ? "MAXIMIZE_CONVERSIONS" : "TARGET_SPEND";
+  if (current === suggested) return null; // já está na estratégia recomendada, nada a sugerir
+  return {
+    campaign_id: campaign.campaign_id,
+    campaign_name: campaign.name,
+    current_strategy: current,
+    suggested_strategy: suggested,
+    conversions,
+    reason:
+      suggested === "MAXIMIZE_CONVERSIONS"
+        ? `${conversions} conversões no período — volume suficiente para o Google otimizar por conversão.`
+        : `Apenas ${conversions} conversões no período — gerar mais tráfego primeiro ajuda a acumular dados.`,
+  };
+}
+
+/**
+ * Aplica de fato a mudança de estratégia de lance na campanha. O campo
+ * union (maximize_conversions / target_spend) é setado diretamente no
+ * objeto da campanha — diferente de orçamento, que vive num resource
+ * separado (campaign_budget).
+ */
+async function updateBiddingStrategy(accessToken, campaignId, strategy) {
+  const campaignResourceName = `customers/${CUSTOMER_ID}/campaigns/${campaignId}`;
+  const campaignUpdate = { resourceName: campaignResourceName };
+  let updateMask;
+
+  if (strategy === "MAXIMIZE_CONVERSIONS") {
+    campaignUpdate.maximizeConversions = {};
+    updateMask = "maximize_conversions";
+  } else if (strategy === "TARGET_SPEND") {
+    campaignUpdate.targetSpend = {};
+    updateMask = "target_spend";
+  } else {
+    throw new Error(`Estratégia "${strategy}" não suportada por esta função.`);
+  }
+
+  const body = {
+    operations: [{ update: campaignUpdate, updateMask }],
+  };
+  return runMutation(accessToken, "campaigns:mutate", body);
+}
+
+/**
+ * 4.7 — Busca performance segmentada por HORA DO DIA (0-23), agregando
+ * cliques/custo/conversões dos últimos 30 dias de uma campanha específica.
+ * segments.hour já vem por linha individual (uma por hora), então
+ * agregamos manualmente por hora aqui.
+ */
+async function fetchHourlyPerformance(accessToken, campaignId) {
+  const query = `
+    SELECT segments.hour, metrics.clicks, metrics.impressions, metrics.cost_micros, metrics.conversions
+    FROM campaign
+    WHERE campaign.id = ${campaignId} AND segments.date DURING LAST_30_DAYS
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Erro ao buscar performance por hora: ${text.slice(0, 300)}`);
+  const batches = JSON.parse(text);
+  const byHour = {};
+  for (const b of batches) {
+    for (const row of b.results || []) {
+      const hour = row.segments?.hour ?? 0;
+      if (!byHour[hour]) byHour[hour] = { clicks: 0, impressions: 0, cost: 0, conversions: 0 };
+      byHour[hour].clicks += Number(row.metrics?.clicks || 0);
+      byHour[hour].impressions += Number(row.metrics?.impressions || 0);
+      byHour[hour].cost += Number(row.metrics?.costMicros || 0) / 1_000_000;
+      byHour[hour].conversions += Number(row.metrics?.conversions || 0);
+    }
+  }
+  return byHour;
+}
+
+/**
+ * Analisa a performance por hora e sugere ajustes de lance (bid modifier)
+ * para os horários com melhor e piores conversão — regra fixa, sem IA:
+ * compara a taxa de conversão (conversões/cliques) de cada hora contra a
+ * média da campanha. Horas com taxa de conversão 50%+ acima da média
+ * recebem +20% de lance; horas 50%+ abaixo da média recebem -20%. Exige
+ * volume mínimo de cliques por hora (>= 5) para considerar o dado
+ * estatisticamente significativo o suficiente.
+ */
+function analyzeHourlyBidAdjustments(byHour) {
+  const hours = Object.entries(byHour)
+    .map(([hour, m]) => ({
+      hour: Number(hour),
+      clicks: m.clicks,
+      conversions: m.conversions,
+      convRate: m.clicks > 0 ? m.conversions / m.clicks : 0,
+    }))
+    .filter((h) => h.clicks >= 5);
+
+  if (hours.length === 0) return { suggestions: [], avgConvRate: 0 };
+
+  const totalClicks = hours.reduce((sum, h) => sum + h.clicks, 0);
+  const totalConversions = hours.reduce((sum, h) => sum + h.conversions, 0);
+  const avgConvRate = totalClicks > 0 ? totalConversions / totalClicks : 0;
+
+  const suggestions = [];
+  for (const h of hours) {
+    if (avgConvRate === 0) continue;
+    const ratio = h.convRate / avgConvRate;
+    if (ratio >= 1.5) {
+      suggestions.push({
+        hour: h.hour,
+        bid_modifier: 1.2,
+        conv_rate: h.convRate,
+        clicks: h.clicks,
+        reason: `Taxa de conversão ${(h.convRate * 100).toFixed(1)}% — 50%+ acima da média (${(avgConvRate * 100).toFixed(1)}%)`,
+      });
+    } else if (ratio <= 0.5) {
+      suggestions.push({
+        hour: h.hour,
+        bid_modifier: 0.8,
+        conv_rate: h.convRate,
+        clicks: h.clicks,
+        reason: `Taxa de conversão ${(h.convRate * 100).toFixed(1)}% — 50%+ abaixo da média (${(avgConvRate * 100).toFixed(1)}%)`,
+      });
+    }
+  }
+
+  return { suggestions, avgConvRate };
+}
+
+/**
+ * Aplica o modifier do mesmo horário em todos os 7 dias da semana de uma
+ * vez (a API exige day_of_week obrigatório no AdScheduleInfo, então
+ * precisamos criar 7 critérios, um por dia, para cobrir a semana toda).
+ */
+async function applyHourlyOptimization(accessToken, campaignId, hour, bidModifier) {
+  const days = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
+  const campaignResourceName = `customers/${CUSTOMER_ID}/campaigns/${campaignId}`;
+  const operations = days.map((day) => ({
+    create: {
+      campaign: campaignResourceName,
+      bidModifier,
+      adSchedule: {
+        dayOfWeek: day,
+        startHour: hour,
+        startMinute: "ZERO",
+        endHour: hour === 23 ? 24 : hour + 1,
+        endMinute: "ZERO",
+      },
+    },
+  }));
+  return runMutation(accessToken, "campaignCriteria:mutate", { operations });
+}
+
+/**
+ * 4.8 — Busca performance segmentada por DISPOSITIVO (MOBILE, DESKTOP,
+ * TABLET) de uma campanha específica nos últimos 30 dias.
+ */
+async function fetchDevicePerformance(accessToken, campaignId) {
+  const query = `
+    SELECT segments.device, metrics.clicks, metrics.impressions, metrics.cost_micros, metrics.conversions
+    FROM campaign
+    WHERE campaign.id = ${campaignId} AND segments.date DURING LAST_30_DAYS
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Erro ao buscar performance por dispositivo: ${text.slice(0, 300)}`);
+  const batches = JSON.parse(text);
+  const byDevice = {};
+  for (const b of batches) {
+    for (const row of b.results || []) {
+      const device = row.segments?.device || "UNKNOWN";
+      if (!byDevice[device]) byDevice[device] = { clicks: 0, impressions: 0, cost: 0, conversions: 0 };
+      byDevice[device].clicks += Number(row.metrics?.clicks || 0);
+      byDevice[device].impressions += Number(row.metrics?.impressions || 0);
+      byDevice[device].cost += Number(row.metrics?.costMicros || 0) / 1_000_000;
+      byDevice[device].conversions += Number(row.metrics?.conversions || 0);
+    }
+  }
+  return byDevice;
+}
+
+/**
+ * Mesma lógica de comparação contra a média que a otimização por horário
+ * usa, mas por dispositivo. Limiar de volume mínimo mais baixo (>=10
+ * cliques) porque normalmente há só 2-3 dispositivos no total.
+ */
+function analyzeDeviceBidAdjustments(byDevice) {
+  const devices = Object.entries(byDevice)
+    .map(([device, m]) => ({
+      device,
+      clicks: m.clicks,
+      conversions: m.conversions,
+      convRate: m.clicks > 0 ? m.conversions / m.clicks : 0,
+    }))
+    .filter((d) => d.clicks >= 10 && d.device !== "UNKNOWN");
+
+  if (devices.length < 2) return { suggestions: [], avgConvRate: 0 };
+
+  const totalClicks = devices.reduce((sum, d) => sum + d.clicks, 0);
+  const totalConversions = devices.reduce((sum, d) => sum + d.conversions, 0);
+  const avgConvRate = totalClicks > 0 ? totalConversions / totalClicks : 0;
+
+  const suggestions = [];
+  for (const d of devices) {
+    if (avgConvRate === 0) continue;
+    const ratio = d.convRate / avgConvRate;
+    if (ratio >= 1.3) {
+      suggestions.push({
+        device: d.device,
+        bid_modifier: 1.2,
+        conv_rate: d.convRate,
+        clicks: d.clicks,
+        reason: `Taxa de conversão ${(d.convRate * 100).toFixed(1)}% — acima da média (${(avgConvRate * 100).toFixed(1)}%)`,
+      });
+    } else if (ratio <= 0.7) {
+      suggestions.push({
+        device: d.device,
+        bid_modifier: 0.8,
+        conv_rate: d.convRate,
+        clicks: d.clicks,
+        reason: `Taxa de conversão ${(d.convRate * 100).toFixed(1)}% — abaixo da média (${(avgConvRate * 100).toFixed(1)}%)`,
+      });
+    }
+  }
+
+  return { suggestions, avgConvRate };
+}
+
+const DEVICE_ENUM_MAP = { MOBILE: "MOBILE", DESKTOP: "DESKTOP", TABLET: "TABLET" };
+
+/**
+ * Aplica bid modifier por dispositivo via CampaignCriterionService.
+ */
+async function setDeviceBidModifier(accessToken, campaignId, device, bidModifier) {
+  const campaignResourceName = `customers/${CUSTOMER_ID}/campaigns/${campaignId}`;
+  const body = {
+    operations: [
+      {
+        create: {
+          campaign: campaignResourceName,
+          bidModifier,
+          device: { type: DEVICE_ENUM_MAP[device] || device },
+        },
+      },
+    ],
+  };
+  return runMutation(accessToken, "campaignCriteria:mutate", body);
+}
+
+/**
+ * 4.9 — Busca performance segmentada por localização (location_view), nos
+ * últimos 30 dias, para uma campanha específica.
+ */
+async function fetchGeoPerformance(accessToken, campaignId) {
+  const query = `
+    SELECT campaign_criterion.location.geo_target_constant, metrics.clicks, metrics.cost_micros, metrics.conversions
+    FROM location_view
+    WHERE campaign.id = ${campaignId} AND segments.date DURING LAST_30_DAYS
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Erro ao buscar performance geográfica: ${text.slice(0, 300)}`);
+  const batches = JSON.parse(text);
+  const rows = [];
+  for (const b of batches) if (b.results) rows.push(...b.results);
+  return rows.map((row) => ({
+    geo_target_constant: row.campaignCriterion?.location?.geoTargetConstant,
+    clicks: Number(row.metrics?.clicks || 0),
+    cost: Number(row.metrics?.costMicros || 0) / 1_000_000,
+    conversions: Number(row.metrics?.conversions || 0),
+  }));
+}
+
+/**
+ * IDs do geo_target_constant para Porto Alegre e principais municípios da
+ * região metropolitana — a "região-alvo" do negócio. IDs são fixos e
+ * públicos no catálogo do Google (Geographical Targeting CSV).
+ */
+const TARGET_REGION_GEO_IDS = new Set([
+  "1001766", // Porto Alegre
+  "1001874", // Canoas
+  "1001780", // Viamão
+  "1001660", // Gravataí
+  "1001607", // Cachoeirinha
+  "1001577", // Alvorada
+  "1001664", // Guaíba
+  "1001714", // Novo Hamburgo
+  "1001779", // São Leopoldo
+]);
+
+/**
+ * Sugere reduzir (não excluir totalmente) o lance em localizações fora da
+ * região-alvo que já geraram gasto sem conversão.
+ */
+function analyzeGeoBidAdjustments(geoRows) {
+  const outsideRegion = geoRows.filter(
+    (r) => r.geo_target_constant && !TARGET_REGION_GEO_IDS.has(String(r.geo_target_constant).replace(/\D/g, "")) && r.cost > 0
+  );
+
+  return outsideRegion
+    .filter((r) => r.conversions === 0)
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 10)
+    .map((r) => ({
+      geo_target_constant: r.geo_target_constant,
+      bid_modifier: 0.5,
+      clicks: r.clicks,
+      cost: r.cost,
+      reason: `R$${r.cost.toFixed(2)} gastos fora da região-alvo (Porto Alegre/RS) sem conversões`,
+    }));
+}
+
+/**
+ * Aplica bid modifier geográfico via CampaignCriterionService.
+ */
+async function setGeoBidModifier(accessToken, campaignId, geoTargetConstant, bidModifier) {
+  const campaignResourceName = `customers/${CUSTOMER_ID}/campaigns/${campaignId}`;
+  const body = {
+    operations: [
+      {
+        create: {
+          campaign: campaignResourceName,
+          bidModifier,
+          location: { geoTargetConstant: `geoTargetConstants/${geoTargetConstant}` },
+        },
+      },
+    ],
+  };
+  return runMutation(accessToken, "campaignCriteria:mutate", body);
+}
+
+/**
  * Busca os grupos de anúncios (ad groups) de uma campanha específica —
  * necessário porque anúncios no Google Ads pertencem a um ad_group, não
  * diretamente à campanha. Pega o primeiro ad_group ENABLED encontrado;
@@ -686,11 +1053,14 @@ async function fetchFirstAdGroup(accessToken, campaignId) {
  * mais variações dão ao algoritmo do Google mais combinações para testar
  * e melhoram o "Ad Strength", segundo a documentação oficial.
  */
-async function generateAdCopy(serviceLabel, finalUrl) {
+async function generateAdCopy(serviceLabel, finalUrl, angle = null) {
+  const angleInstruction = angle
+    ? `\nÂNGULO ESPECÍFICO PARA ESTA VERSÃO: ${angle}\n`
+    : "";
   const prompt = `Você é especialista em Google Ads para uma empresa brasileira de terceirização (limpeza, portaria, facilities) em Porto Alegre, RS, chamada LCS Terceirização.
 
 Crie textos para um Responsive Search Ad (RSA) sobre o serviço: "${serviceLabel}".
-
+${angleInstruction}
 REGRAS OBRIGATÓRIAS DE FORMATO (o Google Ads rejeita se não respeitar):
 - EXATAMENTE 15 headlines, cada uma com NO MÁXIMO 30 caracteres (contando espaços)
 - EXATAMENTE 4 descriptions, cada uma com NO MÁXIMO 90 caracteres (contando espaços)
@@ -773,6 +1143,65 @@ async function createResponsiveSearchAd(accessToken, adGroupId, headlines, descr
   // 2) Criação real.
   const result = await runMutation(accessToken, "adGroupAds:mutate", { operations: [operation] });
   return result.results?.[0]?.resourceName || null;
+}
+
+/**
+ * 4.10 — Cria um Responsive Search Ad já ATIVO (status ENABLED), usado
+ * especificamente para Testes A/B nativos: o Google só distribui tráfego
+ * de teste entre anúncios que estão de fato rodando, então aqui (e só
+ * aqui) o anúncio entra direto ativo, sem a etapa de revisão pausada que
+ * as outras criações de anúncio exigem.
+ */
+async function createActiveResponsiveSearchAd(accessToken, adGroupId, headlines, descriptions, finalUrl) {
+  const adGroupResourceName = `customers/${CUSTOMER_ID}/adGroups/${adGroupId}`;
+  const operation = {
+    create: {
+      adGroup: adGroupResourceName,
+      status: "ENABLED",
+      ad: {
+        responsiveSearchAd: {
+          headlines: headlines.map((text) => ({ text })),
+          descriptions: descriptions.map((text) => ({ text })),
+        },
+        finalUrls: [finalUrl],
+      },
+    },
+  };
+  await runMutation(accessToken, "adGroupAds:mutate", { operations: [operation], validateOnly: true });
+  const result = await runMutation(accessToken, "adGroupAds:mutate", { operations: [operation] });
+  return result.results?.[0]?.resourceName || null;
+}
+
+/**
+ * Gera e cria 2 variantes de Responsive Search Ad no MESMO ad_group,
+ * ambas ativas — o próprio Google Ads já testa A/B nativamente entre
+ * anúncios ativos de um mesmo ad_group, rotacionando exibição e
+ * aprendendo qual performa melhor (Ad Strength / otimização automática de
+ * rotação). Não precisamos implementar lógica de "vencedor" por conta
+ * própria: isso é built-in da plataforma quando há 2+ RSAs no ad_group.
+ * Os 2 ângulos diferentes (ex.: foco em preço vs foco em confiabilidade)
+ * são o que de fato torna o teste informativo — anúncios quase idênticos
+ * não geram aprendizado útil sobre qual mensagem funciona melhor.
+ */
+async function createAbTestAds(accessToken, campaignId, serviceLabel, finalUrl) {
+  const angleA = "Foco em RAPIDEZ e DISPONIBILIDADE — atendimento imediato, sem burocracia, resposta rápida no WhatsApp";
+  const angleB = "Foco em CONFIABILIDADE e EXPERIÊNCIA — anos de experiência, equipe treinada, contrato seguro e profissional";
+
+  const [copyA, copyB] = await Promise.all([
+    generateAdCopy(serviceLabel, finalUrl, angleA),
+    generateAdCopy(serviceLabel, finalUrl, angleB),
+  ]);
+
+  const adGroup = await fetchFirstAdGroup(accessToken, campaignId);
+
+  const resourceNameA = await createActiveResponsiveSearchAd(accessToken, adGroup.id, copyA.headlines, copyA.descriptions, finalUrl);
+  const resourceNameB = await createActiveResponsiveSearchAd(accessToken, adGroup.id, copyB.headlines, copyB.descriptions, finalUrl);
+
+  return {
+    ad_group_name: adGroup.name,
+    variant_a: { resource_name: resourceNameA, angle: "Rapidez e Disponibilidade", headlines: copyA.headlines.slice(0, 3) },
+    variant_b: { resource_name: resourceNameB, angle: "Confiabilidade e Experiência", headlines: copyB.headlines.slice(0, 3) },
+  };
 }
 
 /**
@@ -962,6 +1391,93 @@ async function runAutoOptimizations(accessToken) {
     }
   }
 
+  // --- Estratégia de lance (regra fixa: <5 conversões → Maximizar
+  // Cliques, 5+ → Maximizar Conversões) ---
+  if (enabled.bid_strategy) {
+    const targetCampaigns = campaigns.filter((c) => c.status === "ENABLED" && inScope(c.campaign_id));
+    for (const c of targetCampaigns) {
+      const suggestion = suggestBiddingStrategy(c);
+      if (!suggestion) continue; // já está na estratégia recomendada
+      try {
+        await updateBiddingStrategy(accessToken, c.campaign_id, suggestion.suggested_strategy);
+        applied.push({
+          type: "bidding_strategy",
+          campaign: c.name,
+          from: suggestion.current_strategy,
+          to: suggestion.suggested_strategy,
+        });
+      } catch (err) {
+        errors.push({ type: "bidding_strategy", campaign: c.name, message: err.message });
+      }
+    }
+  }
+
+  // --- Otimização por horário (ajuste de lance por faixa horária) ---
+  // Limita a 3 ajustes por campanha por execução, para não criar dezenas
+  // de critérios de ad_schedule de uma vez sem revisão visual.
+  if (enabled.hourly_optimization) {
+    const targetCampaigns = campaigns.filter((c) => c.status === "ENABLED" && inScope(c.campaign_id));
+    for (const c of targetCampaigns) {
+      try {
+        const byHour = await fetchHourlyPerformance(accessToken, c.campaign_id);
+        const { suggestions } = analyzeHourlyBidAdjustments(byHour);
+        for (const s of suggestions.slice(0, 3)) {
+          try {
+            await applyHourlyOptimization(accessToken, c.campaign_id, s.hour, s.bid_modifier);
+            applied.push({ type: "hourly_bid", campaign: c.name, hour: s.hour, bid_modifier: s.bid_modifier });
+          } catch (err) {
+            errors.push({ type: "hourly_bid", campaign: c.name, hour: s.hour, message: err.message });
+          }
+        }
+      } catch (err) {
+        errors.push({ type: "hourly_bid", campaign: c.name, message: err.message });
+      }
+    }
+  }
+
+  // --- Otimização por dispositivo (ajuste de lance mobile/desktop/tablet) ---
+  if (enabled.device_optimization) {
+    const targetCampaigns = campaigns.filter((c) => c.status === "ENABLED" && inScope(c.campaign_id));
+    for (const c of targetCampaigns) {
+      try {
+        const byDevice = await fetchDevicePerformance(accessToken, c.campaign_id);
+        const { suggestions } = analyzeDeviceBidAdjustments(byDevice);
+        for (const s of suggestions) {
+          try {
+            await setDeviceBidModifier(accessToken, c.campaign_id, s.device, s.bid_modifier);
+            applied.push({ type: "device_bid", campaign: c.name, device: s.device, bid_modifier: s.bid_modifier });
+          } catch (err) {
+            errors.push({ type: "device_bid", campaign: c.name, device: s.device, message: err.message });
+          }
+        }
+      } catch (err) {
+        errors.push({ type: "device_bid", campaign: c.name, message: err.message });
+      }
+    }
+  }
+
+  // --- Otimização geográfica (reduz lance fora da região-alvo) ---
+  // Limita a 5 localizações por campanha por execução.
+  if (enabled.geo_optimization) {
+    const targetCampaigns = campaigns.filter((c) => c.status === "ENABLED" && inScope(c.campaign_id));
+    for (const c of targetCampaigns) {
+      try {
+        const geoRows = await fetchGeoPerformance(accessToken, c.campaign_id);
+        const suggestions = analyzeGeoBidAdjustments(geoRows).slice(0, 5);
+        for (const s of suggestions) {
+          try {
+            await setGeoBidModifier(accessToken, c.campaign_id, s.geo_target_constant, s.bid_modifier);
+            applied.push({ type: "geo_bid", campaign: c.name, geo_target_constant: s.geo_target_constant, cost: s.cost });
+          } catch (err) {
+            errors.push({ type: "geo_bid", campaign: c.name, message: err.message });
+          }
+        }
+      } catch (err) {
+        errors.push({ type: "geo_bid", campaign: c.name, message: err.message });
+      }
+    }
+  }
+
   return { applied, errors, skipped: null };
 }
 
@@ -1061,11 +1577,11 @@ async function generateRecommendations(campaigns) {
   const summaries = campaigns
     .map((c) => {
       const m = c.metrics || {};
-      return `- "${c.name}" (${c.status === "ENABLED" ? "ativa" : "pausada"}, ${c.campaign_type}): ${
+      return `- campaign_id="${c.campaign_id}" nome="${c.name}" (${c.status === "ENABLED" ? "ativa" : "pausada"}, ${c.campaign_type}, estratégia atual: ${c.bidding_strategy}): ${
         m.clicks ?? 0
       } cliques, CTR ${((m.ctr ?? 0) * 100).toFixed(2)}%, custo R$${(m.cost ?? 0).toFixed(2)}, ${
         m.conversions ?? 0
-      } conversões, orçamento R$${(c.budget_amount ?? 0).toFixed(2)}/dia, LCS Score ${c.lcs_score ?? "—"}/10`;
+      } conversões, orçamento atual R$${(c.budget_amount ?? 0).toFixed(2)}/dia, LCS Score ${c.lcs_score ?? "—"}/10`;
     })
     .join("\n");
 
@@ -1076,8 +1592,15 @@ Analise os dados reais das campanhas dos últimos 30 dias abaixo e gere até 6 r
 CAMPANHAS:
 ${summaries}
 
+Para cada recomendação, quando ela corresponder EXATAMENTE a uma das ações abaixo, preencha o campo "action" com os parâmetros certos. Se a recomendação não corresponder a nenhuma ação estruturada (ex: sugestão de copy, de extensão, ou algo qualitativo), deixe "action" como null — não invente uma ação que não se aplica.
+
+AÇÕES DISPONÍVEIS:
+- pause_campaign: { type: "pause_campaign", campaign_id }
+- update_budget: { type: "update_budget", campaign_id, new_amount (número em R$, > 0) }
+- update_bidding_strategy: { type: "update_bidding_strategy", campaign_id, strategy: "MAXIMIZE_CONVERSIONS" | "TARGET_SPEND" }
+
 Responda APENAS um JSON neste formato, sem texto antes ou depois:
-[{"title": "título curto (máx 8 palavras)", "detail": "explicação com números reais (máx 200 caracteres)", "priority": "alta" | "media" | "baixa"}]`;
+[{"title": "título curto (máx 8 palavras)", "detail": "explicação com números reais (máx 200 caracteres)", "priority": "alta" | "media" | "baixa", "action": null | {"type": "...", "campaign_id": "...", ...demais campos}}]`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -1088,7 +1611,7 @@ Responda APENAS um JSON neste formato, sem texto antes ou depois:
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 1200,
+      max_tokens: 1500,
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -1098,11 +1621,23 @@ Responda APENAS um JSON neste formato, sem texto antes ou depois:
 
   const text = data.content?.[0]?.text || "[]";
   const cleaned = text.replace(/```json|```/g, "").trim();
+  let recommendations;
   try {
-    return JSON.parse(cleaned);
+    recommendations = JSON.parse(cleaned);
   } catch {
     throw new Error("A IA retornou um formato inválido ao gerar recomendações.");
   }
+
+  // Validação extra: confere se o campaign_id de cada ação de fato existe
+  // no conjunto de campanhas analisado — evita um botão "Aplicar" que
+  // falharia por referenciar um ID inventado ou de outra conta.
+  const validCampaignIds = new Set(campaigns.map((c) => c.campaign_id));
+  return recommendations.map((r) => {
+    if (r.action && !validCampaignIds.has(r.action.campaign_id)) {
+      return { ...r, action: null };
+    }
+    return r;
+  });
 }
 
 export default async function handler(req, res) {
@@ -1150,14 +1685,102 @@ export default async function handler(req, res) {
     action === "generate_ad_copy" ||
     action === "create_ad" ||
     action === "suggest_keywords" ||
-    action === "add_keyword"
+    action === "add_keyword" ||
+    action === "update_bidding_strategy" ||
+    action === "suggest_hourly_bids" ||
+    action === "apply_hourly_bid" ||
+    action === "suggest_device_bids" ||
+    action === "apply_device_bid" ||
+    action === "suggest_geo_bids" ||
+    action === "apply_geo_bid" ||
+    action === "create_ab_test"
   ) {
     try {
       const accessToken = await getAccessToken();
 
+      if (action === "create_ab_test") {
+        const { campaign_id, service_label } = req.body;
+        if (!campaign_id || !service_label) {
+          return res.status(400).json({ error: "campaign_id e service_label são obrigatórios." });
+        }
+        if (!process.env.ANTHROPIC_API_KEY) {
+          return res.status(500).json({ error: "ANTHROPIC_API_KEY não configurada." });
+        }
+        const result = await createAbTestAds(accessToken, campaign_id, service_label, "https://www.lcsterceirizacaors.com.br");
+        return res.status(200).json({
+          ok: true,
+          message: `2 anúncios criados (ativos) no grupo "${result.ad_group_name}" para teste A/B nativo do Google.`,
+          ...result,
+        });
+      }
+
       if (action === "run_auto_optimizations") {
         const result = await runAutoOptimizations(accessToken);
         return res.status(200).json({ ok: true, ...result });
+      }
+
+      if (action === "suggest_hourly_bids") {
+        const { campaign_id } = req.body;
+        if (!campaign_id) return res.status(400).json({ error: "campaign_id é obrigatório." });
+        const byHour = await fetchHourlyPerformance(accessToken, campaign_id);
+        const { suggestions, avgConvRate } = analyzeHourlyBidAdjustments(byHour);
+        return res.status(200).json({ ok: true, suggestions, avg_conv_rate: avgConvRate });
+      }
+
+      if (action === "apply_hourly_bid") {
+        const { campaign_id, hour, bid_modifier } = req.body;
+        if (!campaign_id || hour === undefined || !bid_modifier) {
+          return res.status(400).json({ error: "campaign_id, hour e bid_modifier são obrigatórios." });
+        }
+        await applyHourlyOptimization(accessToken, campaign_id, hour, bid_modifier);
+        return res.status(200).json({ ok: true, message: `Lance ajustado para o horário ${hour}h (todos os dias da semana).` });
+      }
+
+      if (action === "suggest_device_bids") {
+        const { campaign_id } = req.body;
+        if (!campaign_id) return res.status(400).json({ error: "campaign_id é obrigatório." });
+        const byDevice = await fetchDevicePerformance(accessToken, campaign_id);
+        const { suggestions, avgConvRate } = analyzeDeviceBidAdjustments(byDevice);
+        return res.status(200).json({ ok: true, suggestions, avg_conv_rate: avgConvRate });
+      }
+
+      if (action === "apply_device_bid") {
+        const { campaign_id, device, bid_modifier } = req.body;
+        if (!campaign_id || !device || !bid_modifier) {
+          return res.status(400).json({ error: "campaign_id, device e bid_modifier são obrigatórios." });
+        }
+        await setDeviceBidModifier(accessToken, campaign_id, device, bid_modifier);
+        return res.status(200).json({ ok: true, message: `Lance ajustado para dispositivo ${device}.` });
+      }
+
+      if (action === "suggest_geo_bids") {
+        const { campaign_id } = req.body;
+        if (!campaign_id) return res.status(400).json({ error: "campaign_id é obrigatório." });
+        const geoRows = await fetchGeoPerformance(accessToken, campaign_id);
+        const suggestions = analyzeGeoBidAdjustments(geoRows);
+        return res.status(200).json({ ok: true, suggestions });
+      }
+
+      if (action === "apply_geo_bid") {
+        const { campaign_id, geo_target_constant, bid_modifier } = req.body;
+        if (!campaign_id || !geo_target_constant || !bid_modifier) {
+          return res.status(400).json({ error: "campaign_id, geo_target_constant e bid_modifier são obrigatórios." });
+        }
+        await setGeoBidModifier(accessToken, campaign_id, geo_target_constant, bid_modifier);
+        return res.status(200).json({ ok: true, message: "Lance ajustado para a localização." });
+      }
+
+      if (action === "update_bidding_strategy") {
+        const { campaign_id, strategy } = req.body;
+        if (!campaign_id || !strategy) {
+          return res.status(400).json({ error: "campaign_id e strategy são obrigatórios." });
+        }
+        if (strategy !== "MAXIMIZE_CONVERSIONS" && strategy !== "TARGET_SPEND") {
+          return res.status(400).json({ error: "strategy deve ser MAXIMIZE_CONVERSIONS ou TARGET_SPEND." });
+        }
+        await updateBiddingStrategy(accessToken, campaign_id, strategy);
+        const label = strategy === "MAXIMIZE_CONVERSIONS" ? "Maximizar Conversões" : "Maximizar Cliques";
+        return res.status(200).json({ ok: true, message: `Estratégia de lance atualizada para "${label}".` });
       }
 
       if (action === "suggest_keywords") {
@@ -1306,6 +1929,14 @@ export default async function handler(req, res) {
       }
     }
 
+    // Sugestões de estratégia de lance — regra fixa (sem chamada de IA),
+    // recalculada a cada sincronização porque depende só de métricas que
+    // já temos no próprio fetchCampaigns.
+    const biddingSuggestions = campaigns
+      .filter((c) => c.status === "ENABLED")
+      .map((c) => suggestBiddingStrategy(c))
+      .filter(Boolean);
+
     await docRef.set({
       campaigns,
       hasMetrics: true, // agora trazemos métricas reais de performance (últimos 30 dias)
@@ -1319,6 +1950,7 @@ export default async function handler(req, res) {
       today_metrics: todayMetrics, // null se a busca falhar
       recommendations,
       recommendations_checked_at: recommendationsCheckedAt,
+      bidding_suggestions: biddingSuggestions,
     });
 
     if (alerts.length > 0) {
