@@ -442,6 +442,117 @@ Só inclua termos onde a irrelevância é CLARA. Em caso de dúvida razoável so
 }
 
 /**
+ * Busca as palavras-chave POSITIVAS já cadastradas numa campanha (em todos
+ * os ad groups dela) — usado para evitar que a IA sugira algo que já
+ * existe, o que a API rejeitaria como duplicado.
+ */
+async function fetchExistingKeywords(accessToken, campaignId) {
+  const query = `
+    SELECT ad_group_criterion.keyword.text
+    FROM ad_group_criterion
+    WHERE campaign.id = ${campaignId}
+      AND ad_group_criterion.type = 'KEYWORD'
+      AND ad_group_criterion.negative = FALSE
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Erro ao buscar palavras-chave existentes: ${text.slice(0, 300)}`);
+  const batches = JSON.parse(text);
+  const rows = [];
+  for (const b of batches) if (b.results) rows.push(...b.results);
+  return rows.map((r) => (r.adGroupCriterion?.keyword?.text || "").toLowerCase());
+}
+
+/**
+ * Sugere novas palavras-chave POSITIVAS via IA, baseadas só no serviço da
+ * campanha (não em termos de pesquisa históricos — diferente da função de
+ * negativas, que parte de dados reais de gasto). Evita sugerir qualquer
+ * termo que já exista na campanha, repassando a lista atual no prompt.
+ */
+async function suggestNewKeywords(serviceLabel, existingKeywords) {
+  const existingList = existingKeywords.length > 0 ? existingKeywords.join(", ") : "(nenhuma ainda)";
+
+  const prompt = `Você é especialista em Google Ads para uma empresa brasileira de terceirização (limpeza, portaria, facilities) em Porto Alegre, RS, chamada LCS Terceirização.
+
+Sugira NOVAS palavras-chave de PESQUISA (Search) para uma campanha sobre: "${serviceLabel}".
+
+Palavras-chave que JÁ EXISTEM nesta campanha (não repita nenhuma destas, nem variações muito próximas):
+${existingList}
+
+Sugira até 15 palavras-chave novas, relevantes e específicas — pense em como um morador de condomínio ou gestor de empresa em Porto Alegre pesquisaria esse serviço no Google. Evite termos genéricos demais (ex: "limpeza") que trariam tráfego irrelevante; prefira termos com intenção comercial clara (ex: "limpeza de condomínio porto alegre", "terceirização de portaria preço").
+
+Para cada palavra-chave, sugira o tipo de correspondência mais adequado: "EXACT" (correspondência exata, mais restritiva e segura), "PHRASE" (frase, intermediário) ou "BROAD" (ampla, mais alcance mas mais risco de tráfego irrelevante). Prefira EXACT ou PHRASE na maioria dos casos — só sugira BROAD quando o termo for muito específico e dificilmente ambíguo.
+
+Responda APENAS um JSON neste formato, sem texto antes ou depois:
+[{"term": "...", "match_type": "EXACT" | "PHRASE" | "BROAD", "reason": "motivo curto em português, máx 15 palavras"}]`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1500,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `Erro ${res.status} ao gerar sugestões`);
+
+  const text = data.content?.[0]?.text || "[]";
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  let suggestions;
+  try {
+    suggestions = JSON.parse(cleaned);
+  } catch {
+    throw new Error("A IA retornou um formato inválido. Tente gerar novamente.");
+  }
+
+  // Filtro de segurança extra: remove qualquer sugestão que já exista
+  // (comparação case-insensitive), mesmo que a IA tenha ignorado a
+  // instrução do prompt.
+  const existingSet = new Set(existingKeywords);
+  return suggestions.filter((s) => s.term && !existingSet.has(s.term.toLowerCase()));
+}
+
+/**
+ * Adiciona uma palavra-chave POSITIVA a um ad_group específico. Diferente
+ * da negativa (que vive no nível de campanha via CampaignCriterionService),
+ * palavras positivas vivem no nível de ad_group via AdGroupCriterionService
+ * — por isso aqui é necessário primeiro descobrir o ad_group de destino
+ * (reaproveita fetchFirstAdGroup, já criado para a criação de anúncios).
+ */
+async function addKeyword(accessToken, adGroupId, term, matchType) {
+  const adGroupResourceName = `customers/${CUSTOMER_ID}/adGroups/${adGroupId}`;
+  const body = {
+    operations: [
+      {
+        create: {
+          adGroup: adGroupResourceName,
+          status: "ENABLED",
+          keyword: { text: term, matchType: matchType || "EXACT" },
+        },
+      },
+    ],
+  };
+  return runMutation(accessToken, "adGroupCriteria:mutate", body);
+}
+
+/**
  * Executa uma mutação genérica via GoogleAdsService.mutate — usada pelas 3
  * ações da Fase 4 (negativar termo, pausar campanha, ajustar orçamento).
  * Centralizar aqui evita repetir headers e tratamento de erro 3 vezes.
@@ -529,6 +640,139 @@ async function updateCampaignBudget(accessToken, budgetResourceName, newAmountRe
     ],
   };
   return runMutation(accessToken, "campaignBudgets:mutate", body);
+}
+
+/**
+ * Busca os grupos de anúncios (ad groups) de uma campanha específica —
+ * necessário porque anúncios no Google Ads pertencem a um ad_group, não
+ * diretamente à campanha. Pega o primeiro ad_group ENABLED encontrado;
+ * campanhas com múltiplos ad groups vão sempre receber o novo anúncio no
+ * primeiro da lista (ordenado por nome) até esta função ganhar uma opção
+ * de escolha manual.
+ */
+async function fetchFirstAdGroup(accessToken, campaignId) {
+  const query = `
+    SELECT ad_group.id, ad_group.name, ad_group.status
+    FROM ad_group
+    WHERE campaign.id = ${campaignId} AND ad_group.status = 'ENABLED'
+    ORDER BY ad_group.name
+    LIMIT 1
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Erro ao buscar ad group: ${text.slice(0, 300)}`);
+  const batches = JSON.parse(text);
+  const rows = [];
+  for (const b of batches) if (b.results) rows.push(...b.results);
+  if (rows.length === 0) throw new Error("Nenhum grupo de anúncios ativo encontrado nesta campanha.");
+  return { id: rows[0].adGroup.id, name: rows[0].adGroup.name };
+}
+
+/**
+ * Gera headlines e descriptions para um Responsive Search Ad via Claude,
+ * já respeitando os limites de caracteres do formato (30 chars/headline,
+ * 90 chars/description) — ver pesquisa de especificações RSA 2026.
+ * Retorna sempre 15 headlines e 4 descriptions (o máximo permitido):
+ * mais variações dão ao algoritmo do Google mais combinações para testar
+ * e melhoram o "Ad Strength", segundo a documentação oficial.
+ */
+async function generateAdCopy(serviceLabel, finalUrl) {
+  const prompt = `Você é especialista em Google Ads para uma empresa brasileira de terceirização (limpeza, portaria, facilities) em Porto Alegre, RS, chamada LCS Terceirização.
+
+Crie textos para um Responsive Search Ad (RSA) sobre o serviço: "${serviceLabel}".
+
+REGRAS OBRIGATÓRIAS DE FORMATO (o Google Ads rejeita se não respeitar):
+- EXATAMENTE 15 headlines, cada uma com NO MÁXIMO 30 caracteres (contando espaços)
+- EXATAMENTE 4 descriptions, cada uma com NO MÁXIMO 90 caracteres (contando espaços)
+- Cada headline deve fazer sentido sozinha (o Google mistura e combina, mostrando 2-3 por vez em qualquer ordem)
+- Sem emojis (proibido pelo Google nesse formato)
+- Pelo menos 2 headlines devem mencionar "Porto Alegre" ou "POA"
+- Inclua benefícios concretos, urgência, e ao menos uma headline com chamada direta para WhatsApp
+
+Responda APENAS um JSON neste formato exato, sem texto antes ou depois:
+{"headlines": ["...", "..." (15 itens)], "descriptions": ["...", "..." (4 itens)]}`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1500,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `Erro ${res.status} ao gerar anúncio`);
+
+  const text = data.content?.[0]?.text || "{}";
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    throw new Error("A IA retornou um formato inválido. Tente gerar novamente.");
+  }
+
+  // Corta no limite de caracteres como segurança extra — a IA geralmente
+  // já respeita, mas isso evita que o mutate real falhe por 1-2 caracteres
+  // a mais, o que seria mais frustrante de debugar depois do fato.
+  const headlines = (parsed.headlines || []).slice(0, 15).map((h) => h.slice(0, 30));
+  const descriptions = (parsed.descriptions || []).slice(0, 4).map((d) => d.slice(0, 90));
+
+  if (headlines.length < 3 || descriptions.length < 2) {
+    throw new Error("A IA não gerou headlines/descriptions suficientes (mínimo 3 headlines, 2 descriptions).");
+  }
+
+  return { headlines, descriptions };
+}
+
+/**
+ * Cria o Responsive Search Ad de verdade via API. Primeiro roda com
+ * validateOnly: true (não cria nada, só verifica se o Google aceitaria o
+ * anúncio — pega erros de política, como palavras proibidas, antes de
+ * gastar uma operação real). Se passar a validação, refaz a chamada sem
+ * validateOnly para criar o anúncio de fato, sempre como PAUSED — o
+ * usuário ativa manualmente depois de revisar como ficou no Google Ads,
+ * em vez do anúncio já entrar rodando e gastando antes de qualquer review
+ * visual fora deste painel.
+ */
+async function createResponsiveSearchAd(accessToken, adGroupId, headlines, descriptions, finalUrl) {
+  const adGroupResourceName = `customers/${CUSTOMER_ID}/adGroups/${adGroupId}`;
+  const operation = {
+    create: {
+      adGroup: adGroupResourceName,
+      status: "PAUSED", // criado pausado — ativação é decisão manual após revisão visual
+      ad: {
+        responsiveSearchAd: {
+          headlines: headlines.map((text) => ({ text })),
+          descriptions: descriptions.map((text) => ({ text })),
+        },
+        finalUrls: [finalUrl],
+      },
+    },
+  };
+
+  // 1) Validação (não cria nada) — detecta erro de política antecipado.
+  await runMutation(accessToken, "adGroupAds:mutate", { operations: [operation], validateOnly: true });
+
+  // 2) Criação real.
+  const result = await runMutation(accessToken, "adGroupAds:mutate", { operations: [operation] });
+  return result.results?.[0]?.resourceName || null;
 }
 
 /**
@@ -651,7 +895,88 @@ async function runAutoOptimizations(accessToken) {
     }
   }
 
+  // --- Adição de novas palavras-chave (apenas sugestões de alta confiança) ---
+  // Diferente das outras 2 ações, esta gera conteúdo NOVO via IA a cada
+  // execução (não há um "snapshot" de sugestões pré-calculado pra
+  // palavras positivas, como existe pra negativas) — por isso roda só
+  // para campanhas dentro do escopo selecionado, limitando o custo de
+  // chamadas de IA a campanhas que o usuário realmente escolheu.
+  if (enabled.add_keywords) {
+    const targetCampaigns = campaigns.filter((c) => c.status === "ENABLED" && inScope(c.campaign_id));
+    for (const c of targetCampaigns) {
+      try {
+        const existing = await fetchExistingKeywords(accessToken, c.campaign_id);
+        // Usa o nome da campanha como descrição do serviço — funciona bem
+        // quando os nomes são descritivos (ex.: "Campanha_lcs2026_Portaria"
+        // já dá contexto suficiente pra IA inferir o serviço anunciado).
+        const suggestions = await suggestNewKeywords(c.name, existing);
+        const highConfidence = suggestions.filter((s) => s.confidence === "alta" || !s.confidence);
+        // suggestNewKeywords não retorna "confidence" hoje (só term/match_type/reason)
+        // — todas as sugestões geradas são tratadas como aplicáveis automaticamente
+        // quando esta opção está ativa, já que a filtragem de relevância já
+        // acontece dentro do próprio prompt (evita termos genéricos/ambíguos).
+        const adGroup = await fetchFirstAdGroup(accessToken, c.campaign_id);
+        for (const s of highConfidence.slice(0, 5)) {
+          // Limite de 5 por campanha por execução — evita inflar demais o
+          // ad group de uma vez só numa única rodada automática.
+          try {
+            await addKeyword(accessToken, adGroup.id, s.term, s.match_type);
+            applied.push({ type: "add_keyword", campaign: c.name, term: s.term });
+          } catch (err) {
+            errors.push({ type: "add_keyword", campaign: c.name, term: s.term, message: err.message });
+          }
+        }
+      } catch (err) {
+        errors.push({ type: "add_keyword", campaign: c.name, message: err.message });
+      }
+    }
+  }
+
   return { applied, errors, skipped: null };
+}
+
+/**
+ * Busca o custo total gasto no MÊS CALENDÁRIO ATUAL (não os últimos 30
+ * dias rolantes que fetchCampaigns usa) — é o número que mais se aproxima
+ * do "quanto já gastei este mês" que aparece na tela de faturamento do
+ * Google Ads. Não existe campo de "saldo/crédito disponível" acessível
+ * via API (confirmado pelo próprio suporte da Google em fóruns oficiais):
+ * contas com pagamento automático por cartão não têm saldo pré-pago, o
+ * cartão é cobrado conforme o gasto acontece, sem limite pré-carregado
+ * para subtrair. Por isso mostramos só o "gasto acumulado", não um saldo.
+ */
+async function fetchMonthToDateSpend(accessToken) {
+  const query = `
+    SELECT metrics.cost_micros
+    FROM customer
+    WHERE segments.date DURING THIS_MONTH
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    // Não derruba a sincronização inteira por causa disso — é um dado
+    // complementar, não crítico como o snapshot de campanhas.
+    console.error("Erro ao buscar gasto do mês:", text.slice(0, 300));
+    return null;
+  }
+  const batches = JSON.parse(text);
+  let totalMicros = 0;
+  for (const b of batches) {
+    for (const row of b.results || []) {
+      totalMicros += Number(row.metrics?.costMicros || 0);
+    }
+  }
+  return totalMicros / 1_000_000;
 }
 
 export default async function handler(req, res) {
@@ -695,7 +1020,11 @@ export default async function handler(req, res) {
     action === "add_negative_keyword" ||
     action === "pause_campaign" ||
     action === "update_budget" ||
-    action === "run_auto_optimizations"
+    action === "run_auto_optimizations" ||
+    action === "generate_ad_copy" ||
+    action === "create_ad" ||
+    action === "suggest_keywords" ||
+    action === "add_keyword"
   ) {
     try {
       const accessToken = await getAccessToken();
@@ -703,6 +1032,74 @@ export default async function handler(req, res) {
       if (action === "run_auto_optimizations") {
         const result = await runAutoOptimizations(accessToken);
         return res.status(200).json({ ok: true, ...result });
+      }
+
+      if (action === "suggest_keywords") {
+        // Só sugere via IA — não altera nada na conta ainda.
+        const { service_label, campaign_id } = req.body;
+        if (!service_label || !campaign_id) {
+          return res.status(400).json({ error: "service_label e campaign_id são obrigatórios." });
+        }
+        if (!process.env.ANTHROPIC_API_KEY) {
+          return res.status(500).json({ error: "ANTHROPIC_API_KEY não configurada." });
+        }
+        const existing = await fetchExistingKeywords(accessToken, campaign_id);
+        const suggestions = await suggestNewKeywords(service_label, existing);
+        return res.status(200).json({ ok: true, suggestions });
+      }
+
+      if (action === "add_keyword") {
+        const { campaign_id, term, match_type } = req.body;
+        if (!campaign_id || !term) {
+          return res.status(400).json({ error: "campaign_id e term são obrigatórios." });
+        }
+        const adGroup = await fetchFirstAdGroup(accessToken, campaign_id);
+        await addKeyword(accessToken, adGroup.id, term, match_type);
+        return res.status(200).json({ ok: true, message: `Palavra-chave "${term}" adicionada ao grupo "${adGroup.name}".` });
+      }
+
+      if (action === "generate_ad_copy") {
+        // Só gera o texto via IA — não toca na conta do Google Ads ainda.
+        // O usuário revisa/edita no painel antes de chamar "create_ad".
+        const { service_label } = req.body;
+        if (!service_label) {
+          return res.status(400).json({ error: "service_label é obrigatório." });
+        }
+        if (!process.env.ANTHROPIC_API_KEY) {
+          return res.status(500).json({ error: "ANTHROPIC_API_KEY não configurada." });
+        }
+        const copy = await generateAdCopy(service_label, "https://www.lcsterceirizacaors.com.br");
+        return res.status(200).json({ ok: true, ...copy });
+      }
+
+      if (action === "create_ad") {
+        const { campaign_id, headlines, descriptions, final_url } = req.body;
+        if (!campaign_id || !Array.isArray(headlines) || !Array.isArray(descriptions)) {
+          return res.status(400).json({ error: "campaign_id, headlines e descriptions são obrigatórios." });
+        }
+        if (headlines.length < 3 || headlines.length > 15) {
+          return res.status(400).json({ error: "headlines deve ter entre 3 e 15 itens." });
+        }
+        if (descriptions.length < 2 || descriptions.length > 4) {
+          return res.status(400).json({ error: "descriptions deve ter entre 2 e 4 itens." });
+        }
+        const tooLongHeadline = headlines.find((h) => h.length > 30);
+        if (tooLongHeadline) {
+          return res.status(400).json({ error: `Headline excede 30 caracteres: "${tooLongHeadline}"` });
+        }
+        const tooLongDescription = descriptions.find((d) => d.length > 90);
+        if (tooLongDescription) {
+          return res.status(400).json({ error: `Description excede 90 caracteres: "${tooLongDescription}"` });
+        }
+
+        const adGroup = await fetchFirstAdGroup(accessToken, campaign_id);
+        const finalUrl = final_url || "https://www.lcsterceirizacaors.com.br";
+        const resourceName = await createResponsiveSearchAd(accessToken, adGroup.id, headlines, descriptions, finalUrl);
+        return res.status(200).json({
+          ok: true,
+          message: `Anúncio criado (pausado) no grupo "${adGroup.name}". Revise e ative manualmente no Google Ads.`,
+          resource_name: resourceName,
+        });
       }
 
       if (action === "add_negative_keyword") {
@@ -740,6 +1137,7 @@ export default async function handler(req, res) {
   try {
     const accessToken = await getAccessToken();
     const campaigns = await fetchCampaigns(accessToken);
+    const monthToDateSpend = await fetchMonthToDateSpend(accessToken);
 
     const db = getAdminDb();
     const docRef = db.collection("google_ads_snapshot").doc("current");
@@ -776,6 +1174,7 @@ export default async function handler(req, res) {
       alertsCheckedAt: new Date().toISOString(),
       negative_keyword_suggestions: negativeKeywordSuggestions,
       negative_keywords_checked_at: negativeKeywordsCheckedAt,
+      month_to_date_spend: monthToDateSpend, // null se a busca falhar — tratado como "indisponível" no frontend
     });
 
     if (alerts.length > 0) {
