@@ -3,15 +3,9 @@ import { onSnapshot, doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase/config";
 
 /**
- * Lê o snapshot de campanhas do Google Ads salvo no Firestore. Esse snapshot
- * é populado manualmente (via Claude + Supermetrics MCP) enquanto a Basic
- * Access da API oficial do Google Ads não é aprovada — o developer token
- * ainda está em status "Test Account", que retorna dados vazios.
- *
- * Quando a Basic Access for aprovada, esse hook pode ser trocado para buscar
- * direto de um endpoint /api/google-ads-data que chama a API real, sem
- * precisar alterar os componentes que consomem este hook (mesma forma de
- * retorno: { campaigns, lastUpdated, isRealData, loading, error }).
+ * Lê o snapshot de campanhas do Google Ads salvo no Firestore. O snapshot é
+ * populado pelo endpoint api/google-ads-fetch-real.js, que busca dados
+ * reais direto da Google Ads API oficial (Basic Access aprovado).
  */
 export function useGoogleAdsSnapshot() {
   const [campaigns, setCampaigns] = useState([]);
@@ -20,6 +14,7 @@ export function useGoogleAdsSnapshot() {
   const [alerts, setAlerts] = useState([]);
   const [negativeKeywordSuggestions, setNegativeKeywordSuggestions] = useState([]);
   const [negativeKeywordsCheckedAt, setNegativeKeywordsCheckedAt] = useState(null);
+  const [monthToDateSpend, setMonthToDateSpend] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -36,6 +31,7 @@ export function useGoogleAdsSnapshot() {
           setAlerts(data.alerts || []);
           setNegativeKeywordSuggestions(data.negative_keyword_suggestions || []);
           setNegativeKeywordsCheckedAt(data.negative_keywords_checked_at || null);
+          setMonthToDateSpend(typeof data.month_to_date_spend === "number" ? data.month_to_date_spend : null);
         } else {
           setCampaigns([]);
           setLastUpdated(null);
@@ -43,6 +39,7 @@ export function useGoogleAdsSnapshot() {
           setAlerts([]);
           setNegativeKeywordSuggestions([]);
           setNegativeKeywordsCheckedAt(null);
+          setMonthToDateSpend(null);
         }
         setLoading(false);
       },
@@ -61,6 +58,7 @@ export function useGoogleAdsSnapshot() {
     alerts,
     negativeKeywordSuggestions,
     negativeKeywordsCheckedAt,
+    monthToDateSpend,
     loading,
     error,
   };
