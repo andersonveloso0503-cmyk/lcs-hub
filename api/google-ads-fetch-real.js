@@ -680,12 +680,17 @@ async function updateBiddingStrategy(accessToken, campaignId, strategy) {
   const campaignUpdate = { resourceName: campaignResourceName };
   let updateMask;
 
+  // O Google Ads API rejeita updateMask com o campo "pai" sozinho
+  // (ex.: "maximize_conversions") quando ele tem subcampos — erro
+  // FIELD_HAS_SUBFIELDS, confirmado em múltiplas fontes oficiais. É
+  // preciso referenciar um subcampo específico no path, mesmo que o
+  // valor relevante seja simplesmente "deixar vazio" / usar o default.
   if (strategy === "MAXIMIZE_CONVERSIONS") {
     campaignUpdate.maximizeConversions = {};
-    updateMask = "maximize_conversions";
+    updateMask = "maximize_conversions.target_cpa_micros";
   } else if (strategy === "TARGET_SPEND") {
     campaignUpdate.targetSpend = {};
-    updateMask = "target_spend";
+    updateMask = "target_spend.cpc_bid_ceiling_micros";
   } else {
     throw new Error(`Estratégia "${strategy}" não suportada por esta função.`);
   }
