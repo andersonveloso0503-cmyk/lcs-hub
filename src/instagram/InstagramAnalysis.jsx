@@ -22,7 +22,7 @@ function ProfileAnalysis() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/instagram-analyze", {
+      const res = await fetch("/api/generate-creative-ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "analyze_profile" }),
@@ -140,7 +140,7 @@ function DarkCardGenerator() {
     setGenerating(true);
     setError(null);
     try {
-      const res = await fetch("/api/instagram-analyze", {
+      const res = await fetch("/api/generate-creative-ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "generate_dark_card", service, headline, subtext }),
