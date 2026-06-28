@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Sparkles, Image as ImageIcon, Grid3x3, CalendarDays, List } from "lucide-react";
+import { Sparkles, Image as ImageIcon, Grid3x3, CalendarDays, List, Search } from "lucide-react";
 import PostGenerator from "../instagram/PostGenerator";
 import PhotoEditor from "../instagram/PhotoEditor";
 import ThemeBank from "../instagram/ThemeBank";
 import WeeklyPlanner from "../instagram/WeeklyPlanner";
 import ApprovalQueue from "../instagram/ApprovalQueue";
 import PostsList from "../instagram/PostsList";
+import InstagramAnalysis from "../instagram/InstagramAnalysis";
 import { usePosts } from "../instagram/usePosts";
 import { useThemeBank } from "../instagram/useThemeBank";
 
@@ -61,6 +62,7 @@ export default function InstagramModule() {
         {[
           { id: "week", label: "Semana Automática", icon: CalendarDays },
           { id: "generate", label: "Gerar Post", icon: Sparkles },
+          { id: "analysis", label: "Análise IA", icon: Search },
           { id: "editor", label: "Editor de Fotos", icon: ImageIcon },
           { id: "bank", label: "Banco de Temas", icon: Grid3x3 },
           { id: "posts", label: "Meus Posts", icon: List },
@@ -115,6 +117,8 @@ export default function InstagramModule() {
       {tab === "generate" && (
         <PostGenerator themeBankPhotos={photos} onSavePost={savePost} />
       )}
+
+      {tab === "analysis" && <InstagramAnalysis />}
 
       {tab === "editor" && <PhotoEditor onSaveToBank={handleSaveToBank} />}
 
