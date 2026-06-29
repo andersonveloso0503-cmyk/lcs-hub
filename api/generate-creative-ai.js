@@ -230,12 +230,17 @@ Contexto atual do perfil:
 - Biografia atual: "${profile?.biography || "(vazia)"}"
 - Website na bio: ${profile?.website || "(não configurado)"}
 
-Gere uma sugestão prática e específica para resolver esse problema. Se envolver texto pronto para usar (ex: nova biografia, nova categoria sugerida, ideia de CTA), escreva o texto EXATO sugerido, pronto para copiar e colar. Se for uma ação fora do Instagram (ex: "poste com mais frequência"), explique o passo a passo prático.
+Gere uma sugestão prática e específica para resolver esse problema.
+
+Use estas regras para decidir o "action_type":
+- "copy_text": quando a correção é um texto pronto para colar em algum campo do perfil do Instagram (biografia, categoria, link, nome). Coloque esse texto exato em "ready_to_copy".
+- "create_content": quando o problema é sobre falta de postagens, baixa frequência, pouca variedade de conteúdo, falta de stories, ou qualquer coisa que se resolve PUBLICANDO um post novo. Neste caso, deixe "ready_to_copy" como null — um post será gerado automaticamente por outra parte do sistema.
+- "manual_action": qualquer outra ação que precise ser feita fora do Instagram ou que não se encaixe nos dois casos acima (ex: configurar link de WhatsApp Business, verificar conta, etc.). Deixe "ready_to_copy" como null.
 
 Responda APENAS este JSON, sem texto antes ou depois:
 {
   "suggestion_text": "explicação curta da recomendação (máx 250 caracteres)",
-  "ready_to_copy": "texto pronto para copiar e colar (ex: nova bio), ou null se não se aplicar",
+  "ready_to_copy": "texto pronto para copiar e colar, ou null",
   "action_type": "copy_text" | "manual_action" | "create_content"
 }`;
 
