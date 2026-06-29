@@ -1159,9 +1159,10 @@ async function fetchQualityScores(accessToken) {
  * de SITE, não de uma campanha específica, e só aparece quando se olha o
  * conjunto.
  */
-async function generateAccountAudit(campaigns, qualityScores) {
-  const campaignSummaries = campaigns
-    .filter((c) => c.status === "ENABLED")
+async function generateAccountAudit(campaigns, qualityScores, accessToken) {
+  const activeCampaigns = campaigns.filter((c) => c.status === "ENABLED");
+
+  const campaignSummaries = activeCampaigns
     .map((c) => {
       const m = c.metrics || {};
       return `- campaign_id="${c.campaign_id}" nome="${c.name}" (${c.campaign_type}, estratégia atual: ${c.bidding_strategy}): ${m.clicks ?? 0} cliques, CTR ${((m.ctr ?? 0) * 100).toFixed(2)}%, ${m.conversions ?? 0} conversões, orçamento atual R$${(c.budget_amount ?? 0).toFixed(2)}/dia, LCS Score ${c.lcs_score ?? "—"}/10`;
@@ -1184,7 +1185,57 @@ async function generateAccountAudit(campaigns, qualityScores) {
     .map((q) => `- "${q.keyword}" (campanha "${q.campaign_name}"): QS ${q.quality_score}/10 — relevância: ${q.creative_quality_score || "?"}, CTR esperado: ${q.expected_ctr || "?"}, experiência da página: ${q.landing_page_quality_score || "?"}`)
     .join("\n");
 
-  const prompt = `Você é um especialista sênior em Google Ads fazendo uma AUDITORIA GERAL e ESTRATÉGICA da conta da LCS Terceirização (limpeza, portaria, facilities em Porto Alegre, RS) — o objetivo do cliente é melhorar a posição dos anúncios nas buscas (Índice de Qualidade mais alto = melhor posição e menor custo por clique).
+  // Anúncios (criativos) reais das campanhas ativas — Ad Strength,
+  // headlines e métricas. Mesma fonte usada em generateRecommendations,
+  // reunida aqui também para a auditoria poder identificar e sugerir
+  // criação de novo anúncio quando o Ad Strength estiver fraco.
+  let adsSummary = "Nenhum anúncio analisado (dados indisponíveis ou nenhuma campanha ativa).";
+  if (accessToken) {
+    try {
+      const adsByCampaign = await Promise.all(
+        activeCampaigns.map(async (c) => ({
+          campaign_id: c.campaign_id,
+          campaign_name: c.name,
+          ads: await fetchAdsForCampaign(accessToken, c.campaign_id),
+        }))
+      );
+      const adsLines = [];
+      for (const { campaign_id, campaign_name, ads } of adsByCampaign) {
+        for (const ad of ads) {
+          adsLines.push(
+            `- campaign_id="${campaign_id}" campanha="${campaign_name}" (grupo "${ad.ad_group_name}"): Ad Strength = ${ad.ad_strength}, ${ad.clicks} cliques, CTR ${(ad.ctr * 100).toFixed(2)}%, ${ad.conversions} conversões`
+          );
+        }
+      }
+      if (adsLines.length > 0) adsSummary = adsLines.join("\n");
+    } catch (err) {
+      console.error("Erro ao buscar anúncios para auditoria (segue sem essa parte):", err.message);
+    }
+  }
+
+  // Termos de pesquisa que gastaram sem converter — mesma análise usada
+  // no card de palavras-chave negativas, reunida aqui para a auditoria
+  // poder sugerir negativar diretamente como parte do plano geral, em
+  // vez do usuário precisar visitar outro card separado para isso.
+  let negativeCandidatesSummary = "Nenhum termo de pesquisa com gasto sem conversão identificado.";
+  if (accessToken) {
+    try {
+      const searchTerms = await fetchSearchTerms(accessToken);
+      const candidates = searchTerms
+        .filter((t) => t.cost > 0 && t.conversions === 0)
+        .sort((a, b) => b.cost - a.cost)
+        .slice(0, 30);
+      if (candidates.length > 0) {
+        negativeCandidatesSummary = candidates
+          .map((t) => `- campaign_id="${t.campaign_id}" termo="${t.term}" (campanha "${t.campaign_name}"): R$${t.cost.toFixed(2)} gastos, ${t.clicks} cliques, 0 conversões`)
+          .join("\n");
+      }
+    } catch (err) {
+      console.error("Erro ao buscar termos de pesquisa para auditoria (segue sem essa parte):", err.message);
+    }
+  }
+
+  const prompt = `Você é um especialista sênior em Google Ads fazendo uma AUDITORIA GERAL e ESTRATÉGICA da conta da LCS Terceirização (limpeza, portaria, facilities em Porto Alegre, RS) — o objetivo do cliente é melhorar a posição dos anúncios nas buscas (Índice de Qualidade mais alto = melhor posição e menor custo por clique), cobrindo CRIATIVOS, ANÚNCIOS e PALAVRAS-CHAVE, não só estrutura de campanha.
 
 VISÃO GERAL DAS CAMPANHAS ATIVAS:
 ${campaignSummaries}
@@ -1197,17 +1248,27 @@ ${campaignSummaries}
 15 PALAVRAS-CHAVE COM PIOR ÍNDICE DE QUALIDADE:
 ${worstKeywords || "Nenhum dado de Índice de Qualidade disponível ainda (normal em contas novas ou com baixo volume)."}
 
+ANÚNCIOS (CRIATIVOS) DAS CAMPANHAS ATIVAS:
+${adsSummary}
+
+TERMOS DE PESQUISA QUE GASTARAM SEM CONVERTER (candidatos a palavra-chave negativa):
+${negativeCandidatesSummary}
+
 Faça uma auditoria ESTRATÉGICA E ABRANGENTE (não pontual) identificando:
 1. Padrões sistêmicos (ex.: se muitas palavras têm experiência de página ruim, isso é um problema do SITE como um todo, não de uma campanha)
-2. Quais ações teriam MAIOR impacto na posição geral dos anúncios
-3. Priorização clara (o que resolver primeiro)
+2. Anúncios com Ad Strength fraco que precisam de uma nova versão
+3. Termos de pesquisa claramente irrelevantes que deveriam ser negativados
+4. Quais ações teriam MAIOR impacto na posição geral dos anúncios
+5. Priorização clara (o que resolver primeiro)
 
-Para cada ação prioritária, quando ela corresponder EXATAMENTE a uma das ações automatizáveis abaixo, preencha o campo "action" com os parâmetros certos, usando o campaign_id exato fornecido acima. Se a ação for qualitativa (ex.: "melhore a página de destino", "revise o texto do anúncio") e não corresponder a nenhuma das ações abaixo, deixe "action" como null — não invente uma ação que não existe.
+Para cada ação prioritária, quando ela corresponder EXATAMENTE a uma das ações automatizáveis abaixo, preencha o campo "action" com os parâmetros certos, usando o campaign_id exato fornecido acima. Se a ação for qualitativa (ex.: "melhore a página de destino do site") e não corresponder a nenhuma das ações abaixo, deixe "action" como null — não invente uma ação que não existe. Só sugira negativar um termo se ele aparecer EXPLICITAMENTE na lista de termos com gasto sem conversão acima — não invente termos.
 
 AÇÕES AUTOMATIZÁVEIS DISPONÍVEIS:
 - pause_campaign: { type: "pause_campaign", campaign_id }
 - update_budget: { type: "update_budget", campaign_id, new_amount (número em R$, > 0) }
 - update_bidding_strategy: { type: "update_bidding_strategy", campaign_id, strategy: "MAXIMIZE_CONVERSIONS" | "TARGET_SPEND" }
+- add_negative_keyword: { type: "add_negative_keyword", campaign_id, term (EXATAMENTE como aparece na lista de termos acima) }
+- create_ad: { type: "create_ad", campaign_id, service_label (descrição curta em português do serviço/ângulo do novo anúncio, ex: "limpeza de condomínio com foco em rapidez") }
 
 Responda em JSON neste formato exato, sem texto antes ou depois:
 {
@@ -1217,7 +1278,7 @@ Responda em JSON neste formato exato, sem texto antes ou depois:
   ]
 }
 
-Gere entre 4 e 8 ações prioritárias, ordenadas por impacto (maior impacto primeiro).`;
+Gere entre 5 e 10 ações prioritárias, ordenadas por impacto (maior impacto primeiro), cobrindo criativos/anúncios E palavras-chave quando os dados permitirem, não só estrutura de campanha.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -1247,11 +1308,28 @@ Gere entre 4 e 8 ações prioritárias, ordenadas por impacto (maior impacto pri
 
   // Validação extra: confere se o campaign_id de cada ação de fato existe
   // no conjunto de campanhas analisado — evita um botão "Aplicar" que
-  // falharia por referenciar um ID inventado ou de outra conta.
+  // falharia por referenciar um ID inventado ou de outra conta. Para
+  // add_negative_keyword, valida também se o termo é um dos candidatos
+  // reais (não um termo inventado pela IA) — re-busca a mesma lista de
+  // candidatos usada no prompt para comparar.
   const validCampaignIds = new Set(campaigns.map((c) => c.campaign_id));
+  let validNegativeTerms = new Set();
+  if (accessToken) {
+    try {
+      const searchTerms = await fetchSearchTerms(accessToken);
+      validNegativeTerms = new Set(
+        searchTerms.filter((t) => t.cost > 0 && t.conversions === 0).map((t) => t.term)
+      );
+    } catch {
+      // se falhar, validNegativeTerms fica vazio e qualquer add_negative_keyword é descartado por segurança (ver abaixo)
+    }
+  }
+
   if (Array.isArray(audit.priority_actions)) {
     audit.priority_actions = audit.priority_actions.map((a) => {
-      if (a.action && !validCampaignIds.has(a.action.campaign_id)) {
+      if (!a.action) return a;
+      if (!validCampaignIds.has(a.action.campaign_id)) return { ...a, action: null };
+      if (a.action.type === "add_negative_keyword" && !validNegativeTerms.has(a.action.term)) {
         return { ...a, action: null };
       }
       return a;
@@ -2021,7 +2099,7 @@ export default async function handler(req, res) {
           return res.status(400).json({ error: "Nenhuma campanha no snapshot atual." });
         }
         const qualityScores = await fetchQualityScores(accessToken);
-        const audit = await generateAccountAudit(campaignsForAudit, qualityScores);
+        const audit = await generateAccountAudit(campaignsForAudit, qualityScores, accessToken);
         // Salva no Firestore para o painel poder mostrar sem precisar
         // rodar a auditoria de novo a cada vez que a página é aberta.
         await db.collection("google_ads_snapshot").doc("current").update({
