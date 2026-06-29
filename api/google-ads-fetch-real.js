@@ -1076,6 +1076,171 @@ async function fetchFirstAdGroup(accessToken, campaignId) {
  * Limitado aos anúncios ENABLED (anúncios pausados não geram tráfego
  * atual, então não são relevantes para uma recomendação de melhoria).
  */
+/**
+ * 4.12 — Busca o Índice de Qualidade (Quality Score) de TODAS as
+ * palavras-chave ativas da conta, junto com seus 3 componentes
+ * (creative_quality_score = relevância do anúncio, search_predicted_ctr =
+ * CTR esperado, post_click_quality_score = experiência da página de
+ * destino) — esses 3 fatores juntos formam a nota geral (1-10) que
+ * influencia diretamente o CPC e a posição do anúncio. Usado pela
+ * auditoria geral da conta, que precisa ver isso de forma agregada (não
+ * por campanha isolada) para identificar padrões — ex.: "experiência de
+ * página ruim em quase todas as palavras" sugere um problema no site
+ * como um todo, não em uma campanha específica.
+ */
+async function fetchQualityScores(accessToken) {
+  const query = `
+    SELECT
+      campaign.name,
+      ad_group.name,
+      ad_group_criterion.keyword.text,
+      ad_group_criterion.quality_info.quality_score,
+      ad_group_criterion.quality_info.creative_quality_score,
+      ad_group_criterion.quality_info.post_click_quality_score,
+      ad_group_criterion.quality_info.search_predicted_ctr,
+      metrics.impressions,
+      metrics.clicks
+    FROM keyword_view
+    WHERE campaign.status = 'ENABLED'
+      AND ad_group.status = 'ENABLED'
+      AND ad_group_criterion.status = 'ENABLED'
+      AND ad_group_criterion.quality_info.quality_score IS NOT NULL
+      AND segments.date DURING LAST_30_DAYS
+    ORDER BY ad_group_criterion.quality_info.quality_score ASC
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    // Quality Score não calculado ainda para palavras com pouco volume é
+    // comum (vem null e é filtrado pelo próprio WHERE) — mas se a query
+    // falhar de verdade, não derruba a auditoria inteira por essa parte.
+    console.error("Erro ao buscar quality scores:", text.slice(0, 300));
+    return [];
+  }
+  const batches = JSON.parse(text);
+  const rows = [];
+  for (const b of batches) if (b.results) rows.push(...b.results);
+
+  return rows.map((row) => {
+    const qi = row.adGroupCriterion?.qualityInfo || {};
+    return {
+      campaign_name: row.campaign?.name,
+      ad_group_name: row.adGroup?.name,
+      keyword: row.adGroupCriterion?.keyword?.text,
+      quality_score: qi.qualityScore ?? null,
+      creative_quality_score: qi.creativeQualityScore ?? null, // BELOW_AVERAGE | AVERAGE | ABOVE_AVERAGE
+      landing_page_quality_score: qi.postClickQualityScore ?? null,
+      expected_ctr: qi.searchPredictedCtr ?? null,
+      impressions: Number(row.metrics?.impressions || 0),
+      clicks: Number(row.metrics?.clicks || 0),
+    };
+  });
+}
+
+/**
+ * Gera uma auditoria GERAL da conta (não por campanha isolada): combina
+ * estrutura/métricas das campanhas + criativos + Quality Score agregado,
+ * e pede à IA um plano de ação priorizado e abrangente — no espírito do
+ * que o usuário pediu: "melhorar a campanha em geral para ficar bem
+ * posicionado nas pesquisas". Diferente de generateRecommendations (que
+ * já existe e foca em ações pontuais e estruturadas por campanha), esta
+ * função olha o panorama inteiro e identifica padrões sistêmicos — ex.:
+ * "experiência de página ruim em 80% das palavras-chave" é um problema
+ * de SITE, não de uma campanha específica, e só aparece quando se olha o
+ * conjunto.
+ */
+async function generateAccountAudit(campaigns, qualityScores) {
+  const campaignSummaries = campaigns
+    .filter((c) => c.status === "ENABLED")
+    .map((c) => {
+      const m = c.metrics || {};
+      return `- "${c.name}" (${c.campaign_type}): ${m.clicks ?? 0} cliques, CTR ${((m.ctr ?? 0) * 100).toFixed(2)}%, ${m.conversions ?? 0} conversões, LCS Score ${c.lcs_score ?? "—"}/10`;
+    })
+    .join("\n");
+
+  const qsWithScore = qualityScores.filter((q) => q.quality_score !== null);
+  const avgQs = qsWithScore.length > 0 ? qsWithScore.reduce((sum, q) => sum + q.quality_score, 0) / qsWithScore.length : null;
+
+  // Conta quantas palavras têm cada componente fraco — para a IA
+  // identificar se é um problema sistêmico (a maioria das palavras tem o
+  // mesmo componente fraco) ou pontual (só algumas palavras específicas).
+  const weakCreative = qualityScores.filter((q) => q.creative_quality_score === "BELOW_AVERAGE").length;
+  const weakLandingPage = qualityScores.filter((q) => q.landing_page_quality_score === "BELOW_AVERAGE").length;
+  const weakCtr = qualityScores.filter((q) => q.expected_ctr === "BELOW_AVERAGE").length;
+
+  const worstKeywords = qsWithScore
+    .sort((a, b) => a.quality_score - b.quality_score)
+    .slice(0, 15)
+    .map((q) => `- "${q.keyword}" (campanha "${q.campaign_name}"): QS ${q.quality_score}/10 — relevância: ${q.creative_quality_score || "?"}, CTR esperado: ${q.expected_ctr || "?"}, experiência da página: ${q.landing_page_quality_score || "?"}`)
+    .join("\n");
+
+  const prompt = `Você é um especialista sênior em Google Ads fazendo uma AUDITORIA GERAL e ESTRATÉGICA da conta da LCS Terceirização (limpeza, portaria, facilities em Porto Alegre, RS) — o objetivo do cliente é melhorar a posição dos anúncios nas buscas (Índice de Qualidade mais alto = melhor posição e menor custo por clique).
+
+VISÃO GERAL DAS CAMPANHAS ATIVAS:
+${campaignSummaries}
+
+ÍNDICE DE QUALIDADE (média da conta: ${avgQs !== null ? avgQs.toFixed(1) : "indisponível"}/10, baseado em ${qsWithScore.length} palavras-chave com dado disponível):
+- Palavras com relevância do anúncio BAIXA: ${weakCreative}
+- Palavras com experiência de página de destino BAIXA: ${weakLandingPage}
+- Palavras com CTR esperado BAIXO: ${weakCtr}
+
+15 PALAVRAS-CHAVE COM PIOR ÍNDICE DE QUALIDADE:
+${worstKeywords || "Nenhum dado de Índice de Qualidade disponível ainda (normal em contas novas ou com baixo volume)."}
+
+Faça uma auditoria ESTRATÉGICA E ABRANGENTE (não pontual) identificando:
+1. Padrões sistêmicos (ex.: se muitas palavras têm experiência de página ruim, isso é um problema do SITE como um todo, não de uma campanha)
+2. Quais ações teriam MAIOR impacto na posição geral dos anúncios
+3. Priorização clara (o que resolver primeiro)
+
+Responda em JSON neste formato exato, sem texto antes ou depois:
+{
+  "overall_assessment": "resumo de 2-3 frases sobre o estado geral da conta e o que mais limita a posição dos anúncios hoje",
+  "priority_actions": [
+    {"title": "título curto (máx 10 palavras)", "detail": "explicação específica com números reais (máx 250 caracteres)", "impact": "alto" | "medio" | "baixo", "category": "criativo" | "pagina_destino" | "palavras_chave" | "estrutura"}
+  ]
+}
+
+Gere entre 4 e 8 ações prioritárias, ordenadas por impacto (maior impacto primeiro).`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 2000,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `Erro ${res.status} ao gerar auditoria`);
+
+  const text = data.content?.[0]?.text || "{}";
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  let audit;
+  try {
+    audit = JSON.parse(cleaned);
+  } catch {
+    throw new Error("A IA retornou um formato inválido na auditoria geral.");
+  }
+
+  return { ...audit, avg_quality_score: avgQs, keywords_analyzed: qsWithScore.length };
+}
+
 async function fetchAdsForCampaign(accessToken, campaignId) {
   const query = `
     SELECT
@@ -1815,10 +1980,35 @@ export default async function handler(req, res) {
     action === "suggest_geo_bids" ||
     action === "apply_geo_bid" ||
     action === "create_ab_test" ||
-    action === "refresh_recommendations"
+    action === "refresh_recommendations" ||
+    action === "run_account_audit"
   ) {
     try {
       const accessToken = await getAccessToken();
+
+      if (action === "run_account_audit") {
+        if (!process.env.ANTHROPIC_API_KEY) {
+          return res.status(500).json({ error: "ANTHROPIC_API_KEY não configurada." });
+        }
+        const db = getAdminDb();
+        const snap = await db.collection("google_ads_snapshot").doc("current").get();
+        if (!snap.exists) {
+          return res.status(400).json({ error: "Nenhum snapshot de campanhas encontrado. Sincronize primeiro." });
+        }
+        const campaignsForAudit = snap.data().campaigns || [];
+        if (campaignsForAudit.length === 0) {
+          return res.status(400).json({ error: "Nenhuma campanha no snapshot atual." });
+        }
+        const qualityScores = await fetchQualityScores(accessToken);
+        const audit = await generateAccountAudit(campaignsForAudit, qualityScores);
+        // Salva no Firestore para o painel poder mostrar sem precisar
+        // rodar a auditoria de novo a cada vez que a página é aberta.
+        await db.collection("google_ads_snapshot").doc("current").update({
+          account_audit: audit,
+          account_audit_checked_at: new Date().toISOString(),
+        });
+        return res.status(200).json({ ok: true, ...audit });
+      }
 
       if (action === "refresh_recommendations") {
         // Recalcula só as recomendações da IA, sem rodar mais nada (sem
