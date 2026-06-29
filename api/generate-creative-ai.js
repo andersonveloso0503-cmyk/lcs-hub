@@ -344,7 +344,13 @@ function buildShotstackTimeline(slideImageUrls, slideTexts, slideDuration = 4) {
     start: i * slideDuration + 0.3, // pequeno delay para o texto aparecer depois da imagem
     length: slideDuration - 0.3,
     position: "bottom",
-    offset: { y: -0.1 }, // sobe um pouco mais (era -0.05) -- texto ainda colava demais na borda
+    // CORREÇÃO DE DIREÇÃO: no Shotstack, valores NEGATIVOS de offset.y
+    // movem o clip para BAIXO (confirmado na doc oficial: "negative -50
+    // to move the clip down the vertical y axis"). As tentativas
+    // anteriores (-0.05, -0.1) estavam descendo o texto, não subindo —
+    // por isso ficava cada vez mais colado/cortado na borda inferior.
+    // Valor positivo sobe o texto para cima, afastando da borda.
+    offset: { y: 0.12 },
     transition: { in: "fade", out: "fade" },
   }));
 
