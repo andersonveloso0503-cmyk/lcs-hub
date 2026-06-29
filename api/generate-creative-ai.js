@@ -316,10 +316,16 @@ function buildShotstackTimeline(slideImageUrls, slideTexts, slideDuration = 4) {
     asset: {
       type: "title",
       text,
-      style: "minimal",
+      // "subtitle" (em vez do antigo "minimal") já vem com fundo sólido
+      // atrás do texto — essencial para legibilidade sobre fotos com
+      // qualquer nível de claridade/contraste; "minimal" não tinha fundo
+      // nenhum, o que tornava o texto ilegível conforme a foto de fundo.
+      style: "subtitle",
       color: "#ffffff",
-      size: "medium",
+      size: "large", // "medium" ficava pequeno demais num vídeo vertical 1080x1920
+      background: "#000000",
       position: "bottom",
+      offset: { y: -0.08 }, // sobe um pouco a barra do texto pra não colar na borda inferior
     },
     start: i * slideDuration + 0.3, // pequeno delay para o texto aparecer depois da imagem
     length: slideDuration - 0.3,
