@@ -330,7 +330,7 @@ function buildShotstackTimeline(slideImageUrls, slideTexts, slideDuration = 4) {
         color: "#ffffff",
         lineHeight: 1.15,
       },
-      align: {
+      alignment: {
         horizontal: "center",
         vertical: "center",
       },
