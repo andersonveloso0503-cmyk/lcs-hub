@@ -314,21 +314,37 @@ function buildShotstackTimeline(slideImageUrls, slideTexts, slideDuration = 4) {
 
   const textClips = slideTexts.map((text, i) => ({
     asset: {
-      type: "title",
+      // Trocado de "title" para "text": o tipo "title" não respeita uma
+      // largura customizável da mesma forma, então o texto saía reto e
+      // cortava nas bordas laterais do vídeo (texto longo ficava maior
+      // que os 1080px de largura). O tipo "text" define um container com
+      // width/height fixos e quebra automaticamente em múltiplas linhas
+      // para caber dentro dele, em vez de vazar pra fora da tela.
+      type: "text",
       text,
-      // "subtitle" (em vez do antigo "minimal") já vem com fundo sólido
-      // atrás do texto — essencial para legibilidade sobre fotos com
-      // qualquer nível de claridade/contraste; "minimal" não tinha fundo
-      // nenhum, o que tornava o texto ilegível conforme a foto de fundo.
-      style: "subtitle",
-      color: "#ffffff",
-      size: "large", // "medium" ficava pequeno demais num vídeo vertical 1080x1920
-      background: "#000000",
-      position: "bottom",
-      offset: { y: -0.08 }, // sobe um pouco a barra do texto pra não colar na borda inferior
+      width: 900, // 1080 (largura do vídeo) menos ~90px de margem de cada lado
+      height: 400, // altura generosa pra caber até 3-4 linhas se o texto for longo
+      font: {
+        family: "Open Sans",
+        size: 56,
+        color: "#ffffff",
+        lineHeight: 1.15,
+      },
+      align: {
+        horizontal: "center",
+        vertical: "center",
+      },
+      background: {
+        color: "#000000",
+        opacity: 0.65,
+        padding: 24,
+        borderRadius: 12,
+      },
     },
     start: i * slideDuration + 0.3, // pequeno delay para o texto aparecer depois da imagem
     length: slideDuration - 0.3,
+    position: "bottom",
+    offset: { y: -0.08 }, // sobe um pouco a barra do texto pra não colar na borda inferior
     transition: { in: "fade", out: "fade" },
   }));
 
