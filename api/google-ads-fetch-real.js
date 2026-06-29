@@ -1985,6 +1985,7 @@ export default async function handler(req, res) {
   const action = req.body?.action;
   if (
     action === "add_negative_keyword" ||
+    action === "dismiss_negative_keyword" ||
     action === "pause_campaign" ||
     action === "update_budget" ||
     action === "run_auto_optimizations" ||
@@ -2217,7 +2218,44 @@ export default async function handler(req, res) {
           return res.status(400).json({ error: "campaign_id e term são obrigatórios." });
         }
         await addNegativeKeyword(accessToken, campaign_id, term);
+
+        // Remove a sugestão do snapshot persistido — sem isso, ela
+        // continuaria aparecendo na tela após recarregar a página, já que
+        // o front lê direto do Firestore (não há outro lugar marcando
+        // "já aplicada" de forma durável).
+        try {
+          const db = getAdminDb();
+          const docRef = db.collection("google_ads_snapshot").doc("current");
+          const snap = await docRef.get();
+          if (snap.exists) {
+            const current = snap.data().negative_keyword_suggestions || [];
+            const updated = current.filter((s) => !(s.campaign_id === campaign_id && s.term === term));
+            await docRef.update({ negative_keyword_suggestions: updated });
+          }
+        } catch (err) {
+          console.error("Erro ao remover sugestão aplicada do snapshot (não bloqueia a resposta):", err.message);
+        }
+
         return res.status(200).json({ ok: true, message: `Palavra negativa "${term}" adicionada.` });
+      }
+
+      if (action === "dismiss_negative_keyword") {
+        // Descartar também precisa persistir — sem isso, a sugestão volta
+        // a aparecer ao recarregar a página, exatamente como acontecia
+        // com "Aplicar" antes desta correção.
+        const { campaign_id, term } = req.body;
+        if (!campaign_id || !term) {
+          return res.status(400).json({ error: "campaign_id e term são obrigatórios." });
+        }
+        const db = getAdminDb();
+        const docRef = db.collection("google_ads_snapshot").doc("current");
+        const snap = await docRef.get();
+        if (snap.exists) {
+          const current = snap.data().negative_keyword_suggestions || [];
+          const updated = current.filter((s) => !(s.campaign_id === campaign_id && s.term === term));
+          await docRef.update({ negative_keyword_suggestions: updated });
+        }
+        return res.status(200).json({ ok: true, message: "Sugestão descartada." });
       }
 
       if (action === "pause_campaign") {
