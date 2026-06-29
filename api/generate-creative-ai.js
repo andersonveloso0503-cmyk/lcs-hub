@@ -109,11 +109,7 @@ async function getInstagramAccountId() {
 }
 
 async function fetchInstagramProfile(igAccountId) {
-  // Removido "category_name" — campo descontinuado nesta versão da Graph
-  // API para este tipo de conta (causava erro #100 "Tried accessing
-  // nonexisting field (category_name)"). A categoria não é essencial para
-  // a análise, então foi simplesmente retirada da lista de campos.
-  const fields = "username,name,biography,website,followers_count,follows_count,media_count,profile_picture_url";
+  const fields = "username,name,biography,website,followers_count,follows_count,media_count,profile_picture_url,category_name";
   const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}?fields=${fields}&access_token=${process.env.FACEBOOK_PAGE_ACCESS_TOKEN}`;
   const res = await fetch(url);
   const data = await res.json();
@@ -164,6 +160,7 @@ Analise o perfil do Instagram da LCS Terceirização (limpeza, portaria e facili
 PERFIL:
 - Username: @${profile.username || "desconhecido"}
 - Nome: ${profile.name || "(não definido)"}
+- Categoria: ${profile.category_name || "(NÃO DEFINIDA)"}
 - Biografia: "${profile.biography || "(vazia)"}"
 - Website na bio: ${profile.website || "(não configurado)"}
 - Seguidores: ${profile.followers_count ?? "?"}
@@ -211,66 +208,6 @@ Responda APENAS este JSON, sem texto antes ou depois:
 }
 
 /**
- * Gera uma sugestão concreta de correção para um item específico apontado
- * na análise de perfil (ex: bio fraca, sem categoria, poucos posts). Não
- * altera nada automaticamente — a Instagram Graph API não permite editar
- * bio/categoria/foto de perfil de contas business via API, então o usuário
- * sempre revisa e aplica manualmente no app do Instagram.
- */
-async function suggestFixForItem(item, profile) {
-  const prompt = `Você é consultor de Instagram para pequenos negócios B2B no Brasil, ajudando a empresa "LCS Terceirização" (limpeza, portaria, facilities, Porto Alegre RS).
-
-Um relatório de análise de perfil apontou o seguinte problema:
-- Título: "${item.title}"
-- Detalhe: "${item.detail}"
-
-Contexto atual do perfil:
-- Username: @${profile?.username || "desconhecido"}
-- Nome: ${profile?.name || "(não definido)"}
-- Biografia atual: "${profile?.biography || "(vazia)"}"
-- Website na bio: ${profile?.website || "(não configurado)"}
-
-Gere uma sugestão prática e específica para resolver esse problema.
-
-Use estas regras para decidir o "action_type":
-- "copy_text": quando a correção é um texto pronto para colar em algum campo do perfil do Instagram (biografia, categoria, link, nome). Coloque esse texto exato em "ready_to_copy".
-- "create_content": quando o problema é sobre falta de postagens, baixa frequência, pouca variedade de conteúdo, falta de stories, ou qualquer coisa que se resolve PUBLICANDO um post novo. Neste caso, deixe "ready_to_copy" como null — um post será gerado automaticamente por outra parte do sistema.
-- "manual_action": qualquer outra ação que precise ser feita fora do Instagram ou que não se encaixe nos dois casos acima (ex: configurar link de WhatsApp Business, verificar conta, etc.). Deixe "ready_to_copy" como null.
-
-Responda APENAS este JSON, sem texto antes ou depois:
-{
-  "suggestion_text": "explicação curta da recomendação (máx 250 caracteres)",
-  "ready_to_copy": "texto pronto para copiar e colar, ou null",
-  "action_type": "copy_text" | "manual_action" | "create_content"
-}`;
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 600,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || `Erro ${res.status} ao gerar sugestão`);
-
-  const text = data.content?.[0]?.text || "{}";
-  const cleaned = text.replace(/```json|```/g, "").trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    throw new Error("A IA retornou um formato inválido na sugestão de correção.");
-  }
-}
-
-/**
  * Gera um criativo "card escuro" via DALL-E (gpt-image-1.5), com estética
  * próxima dos exemplos de referência do usuário: fundo navy/escuro, foto
  * de contexto ao fundo, headline grande em destaque, faixa de WhatsApp.
@@ -298,7 +235,7 @@ Style: clean, editorial, professional, high contrast, suitable for a B2B service
       n: 1,
       size: "1024x1024",
       quality: "medium",
-      output_format: "png",
+      output_format: "b64_json",
     }),
   });
 
@@ -306,6 +243,248 @@ Style: clean, editorial, professional, high contrast, suitable for a B2B service
   const b64 = data?.data?.[0]?.b64_json;
   if (!b64) throw new Error(`Sem imagem gerada: ${JSON.stringify(data?.error)}`);
   return `data:image/png;base64,${b64}`;
+}
+
+// ── Reels (vídeo slideshow com IA + Shotstack) ─────────────────────────────
+// Fluxo: 1) gera N imagens via IA (reaproveita generateWithOpenAI), 2) sobe
+// cada imagem pro Vercel Blob (precisa de URL pública para o Shotstack
+// acessar), 3) monta o vídeo no Shotstack com efeito Ken Burns + texto
+// sobreposto em cada slide, 4) faz polling até o render terminar, 5) sobe
+// o vídeo final pro Blob também (para virar a video_url exigida pela
+// Instagram Graph API), 6) publica como Reel via container + polling +
+// media_publish. Mesclado neste arquivo pela mesma razão de sempre: não
+// estourar o limite de 12 funções serverless do plano Hobby.
+
+import { put } from "@vercel/blob";
+
+const SHOTSTACK_API_URL = "https://api.shotstack.io/edit/v1";
+
+/**
+ * Sobe um buffer/base64 para o Vercel Blob e retorna a URL pública —
+ * necessário porque tanto o Shotstack quanto a Instagram Graph API exigem
+ * URLs públicas para os assets (imagens de entrada e vídeo final), não
+ * aceitam upload direto de bytes.
+ */
+async function uploadToBlob(buffer, filename, contentType) {
+  const blob = await put(filename, buffer, {
+    access: "public",
+    contentType,
+    token: process.env.BLOB_READ_WRITE_TOKEN,
+  });
+  return blob.url;
+}
+
+/**
+ * Gera UMA imagem de slide do Reel via IA e sobe pro Blob — não faz loop
+ * por todos os slides aqui dentro, porque cada chamada de imagem já leva
+ * vários segundos sozinha (gerar 4 em sequência facilmente passaria do
+ * limite de ~10s do Vercel Hobby). O frontend chama esta ação uma vez por
+ * slide, em sequência, mostrando o progresso entre cada uma.
+ */
+async function generateReelSlideImage(sceneDescription) {
+  const prompt = `Professional, modern Instagram Reels background photo for a Brazilian facilities services company "LCS Terceirização" (cleaning, security/portaria, facilities and maintenance services for condominiums and businesses in Porto Alegre, Brazil).
+
+Scene: ${sceneDescription}
+Style: realistic, professional photo, vertical 9:16 orientation, slightly darkened for text overlay readability, high quality, suitable for a B2B services company social media video. No text in the image — text will be added separately.`;
+
+  const imageBase64 = await generateWithOpenAI(prompt, "1024x1536");
+  const matches = imageBase64.match(/^data:(image\/\w+);base64,(.+)$/);
+  const buffer = Buffer.from(matches[2], "base64");
+  return uploadToBlob(buffer, `reel-slide-${Date.now()}.png`, matches[1]);
+}
+
+/**
+ * Monta o JSON do timeline do Shotstack: 1 track de imagens (com efeito
+ * Ken Burns automático — zoom/pan lento, dá sensação de movimento a partir
+ * de fotos estáticas) + 1 track de texto sobreposto, sincronizado por
+ * slide. Cada slide dura slideDuration segundos; duração total = N * slideDuration.
+ */
+function buildShotstackTimeline(slideImageUrls, slideTexts, slideDuration = 4) {
+  const imageClips = slideImageUrls.map((url, i) => ({
+    asset: { type: "image", src: url },
+    start: i * slideDuration,
+    length: slideDuration,
+    effect: i % 2 === 0 ? "zoomIn" : "zoomOut", // alterna zoom in/out a cada slide para variar o movimento (efeito Ken Burns)
+    transition: { in: "fade", out: "fade" },
+  }));
+
+  const textClips = slideTexts.map((text, i) => ({
+    asset: {
+      type: "title",
+      text,
+      style: "minimal",
+      color: "#ffffff",
+      size: "medium",
+      position: "bottom",
+    },
+    start: i * slideDuration + 0.3, // pequeno delay para o texto aparecer depois da imagem
+    length: slideDuration - 0.3,
+    transition: { in: "fade", out: "fade" },
+  }));
+
+  return {
+    timeline: {
+      background: "#000000",
+      tracks: [{ clips: textClips }, { clips: imageClips }], // track de texto por cima (Shotstack renderiza tracks de cima para baixo na ordem do array = topo da pilha primeiro)
+    },
+    output: {
+      format: "mp4",
+      size: { width: 1080, height: 1920 }, // 9:16 vertical, formato exigido pelo Reels
+      fps: 30,
+    },
+  };
+}
+
+/**
+ * Envia o render para o Shotstack e retorna o render id (processamento é
+ * assíncrono — precisa fazer polling depois para saber quando terminou).
+ */
+async function submitShotstackRender(timelineJson) {
+  const res = await fetch(`${SHOTSTACK_API_URL}/render`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.SHOTSTACK_API_KEY,
+    },
+    body: JSON.stringify(timelineJson),
+  });
+  const data = await res.json();
+  if (!res.ok || !data?.response?.id) {
+    throw new Error(`Erro ao enviar render para o Shotstack: ${JSON.stringify(data)}`);
+  }
+  return data.response.id;
+}
+
+/**
+ * Verifica o status do render UMA VEZ (sem loop interno) — o polling de
+ * verdade é feito pelo FRONTEND, chamando essa ação repetidamente a cada
+ * poucos segundos. Isso é necessário porque o Vercel Hobby mata qualquer
+ * função serverless depois de ~10s; um loop de polling de 1-2 minutos
+ * dentro da função travaria certamente. Retorna o status atual e, se
+ * pronto, a URL do vídeo.
+ */
+async function checkShotstackRenderStatus(renderId) {
+  const res = await fetch(`${SHOTSTACK_API_URL}/render/${renderId}`, {
+    headers: { "x-api-key": process.env.SHOTSTACK_API_KEY },
+  });
+  const data = await res.json();
+  const status = data?.response?.status;
+  if (status === "failed") throw new Error(`Render do Shotstack falhou: ${JSON.stringify(data.response)}`);
+  return { status, url: status === "done" ? data.response.url : null };
+}
+
+/**
+ * Baixa o vídeo final do Shotstack e sobe pro Vercel Blob — embora o
+ * Shotstack já forneça uma URL pública própria, preferimos ter uma cópia
+ * no nosso Blob (mesma infraestrutura usada para as imagens) para não
+ * depender da URL do Shotstack permanecer acessível no longo prazo, já
+ * que a Instagram Graph API busca o vídeo no momento da publicação.
+ */
+async function copyVideoToBlob(shotstackVideoUrl) {
+  const res = await fetch(shotstackVideoUrl);
+  if (!res.ok) throw new Error("Erro ao baixar o vídeo renderizado do Shotstack.");
+  const arrayBuffer = await res.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  return uploadToBlob(buffer, `reel-${Date.now()}.mp4`, "video/mp4");
+}
+
+/**
+ * Etapa 1/2 de publicar o Reel: cria o container no Instagram (rápido,
+ * só registra a intenção de publicar — o processamento real do vídeo
+ * acontece depois, de forma assíncrona do lado do Instagram).
+ */
+async function createReelContainer(igAccountId, videoUrl, caption) {
+  const createUrl = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}/media`;
+  const createRes = await fetch(createUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      media_type: "REELS",
+      video_url: videoUrl,
+      caption,
+      share_to_feed: true,
+      access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN,
+    }),
+  });
+  const createData = await createRes.json();
+  if (createData.error) throw new Error(`Erro ao criar container do Reel: ${createData.error.message}`);
+  return createData.id;
+}
+
+/**
+ * Etapa 2/2: verifica UMA VEZ se o container já processou (sem loop
+ * interno — o frontend chama repetidamente). Se "FINISHED", publica
+ * imediatamente e retorna o ID do Reel publicado; caso contrário, só
+ * retorna o status atual para o frontend tentar de novo em alguns segundos.
+ */
+async function checkAndPublishReel(igAccountId, containerId) {
+  const statusRes = await fetch(
+    `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${containerId}?fields=status_code&access_token=${process.env.FACEBOOK_PAGE_ACCESS_TOKEN}`
+  );
+  const statusData = await statusRes.json();
+  if (statusData.status_code === "ERROR" || statusData.status_code === "EXPIRED") {
+    throw new Error(`Processamento do Reel falhou: ${statusData.status_code}`);
+  }
+  if (statusData.status_code !== "FINISHED") {
+    return { status: statusData.status_code, published: false, mediaId: null };
+  }
+
+  const publishRes = await fetch(
+    `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}/media_publish`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ creation_id: containerId, access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN }),
+    }
+  );
+  const publishData = await publishRes.json();
+  if (publishData.error) throw new Error(`Erro ao publicar o Reel: ${publishData.error.message}`);
+  return { status: "FINISHED", published: true, mediaId: publishData.id };
+}
+
+/**
+ * Gera 3-5 slides (cena + texto curto) via IA a partir do tema do Reel,
+ * para alimentar tanto generateReelSlideImages quanto o texto sobreposto
+ * no Shotstack. Mantém os textos curtos (máx ~60 caracteres) porque o
+ * estilo "title" do Shotstack não quebra linha automaticamente bem para
+ * textos longos em vídeos verticais estreitos.
+ */
+async function generateReelScript(theme) {
+  const prompt = `Você é roteirista de Reels para Instagram de uma empresa brasileira de terceirização (limpeza, portaria, facilities) em Porto Alegre, RS, chamada LCS Terceirização.
+
+Crie um roteiro de Reel curto (4 slides) sobre o tema: "${theme}".
+
+Para cada slide, descreva:
+- scene_description: descrição em INGLÊS de uma cena fotográfica realista relacionada ao tema (para gerar a imagem de fundo via IA)
+- text: o texto curto que aparece sobreposto no slide, em PORTUGUÊS, máximo 60 caracteres, direto e impactante (estilo Reels — frases curtas, gancho nos primeiros slides, CTA no último)
+
+Responda APENAS um JSON neste formato, sem texto antes ou depois:
+{"slides": [{"scene_description": "...", "text": "..."}], "caption": "legenda completa para o post, em português, com 2-3 hashtags relevantes ao final"}`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1200,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `Erro ${res.status} ao gerar roteiro do Reel`);
+
+  const text = data.content?.[0]?.text || "{}";
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    throw new Error("A IA retornou um formato inválido no roteiro do Reel.");
+  }
 }
 
 export default async function handler(req, res) {
@@ -319,7 +498,7 @@ export default async function handler(req, res) {
   // de um arquivo próprio, para não passar do limite de 12 funções
   // serverless do plano Hobby da Vercel) — ver detalhes nas funções
   // analyzeProfileWithAI/generateDarkCardCreative abaixo.
-  if (action === "analyze_profile" || action === "generate_dark_card" || action === "suggest_fix") {
+  if (action === "analyze_profile" || action === "generate_dark_card") {
     try {
       if (action === "analyze_profile") {
         if (!process.env.FACEBOOK_PAGE_ACCESS_TOKEN || !process.env.FACEBOOK_PAGE_ID) {
@@ -346,20 +525,93 @@ export default async function handler(req, res) {
         const imageBase64 = await generateDarkCardCreative(service, headline, subtext || "");
         return res.status(200).json({ ok: true, imageBase64 });
       }
+    } catch (err) {
+      console.error("Erro na análise/card do Instagram:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  }
 
-      if (action === "suggest_fix") {
-        const { item, profile } = req.body || {};
-        if (!item || !item.title) {
-          return res.status(400).json({ error: "item (com title/detail) é obrigatório." });
-        }
+  // Reels — fluxo dividido em etapas CURTAS (cada chamada de API roda em
+  // poucos segundos), porque o Vercel Hobby mata qualquer função
+  // serverless depois de ~10s e o processo completo (gerar roteiro + N
+  // imagens + renderizar vídeo + publicar) levaria minutos se feito numa
+  // chamada só. O frontend (ver ReelCreator.jsx) orquestra a sequência,
+  // chamando cada ação uma por vez e fazendo polling onde necessário.
+  const REELS_ACTIONS = [
+    "generate_reel_script",
+    "generate_reel_slide_image",
+    "build_reel_video",
+    "check_reel_video_status",
+    "create_reel_container",
+    "check_and_publish_reel",
+  ];
+  if (REELS_ACTIONS.includes(action)) {
+    try {
+      if (action === "generate_reel_script") {
+        const { theme } = req.body;
+        if (!theme) return res.status(400).json({ error: "theme é obrigatório." });
         if (!process.env.ANTHROPIC_API_KEY) {
           return res.status(500).json({ error: "ANTHROPIC_API_KEY não configurada." });
         }
-        const suggestion = await suggestFixForItem(item, profile);
-        return res.status(200).json({ ok: true, ...suggestion });
+        const script = await generateReelScript(theme);
+        return res.status(200).json({ ok: true, ...script });
+      }
+
+      if (action === "generate_reel_slide_image") {
+        const { scene_description } = req.body;
+        if (!scene_description) return res.status(400).json({ error: "scene_description é obrigatório." });
+        if (!process.env.OPENAI_API_KEY) {
+          return res.status(500).json({ error: "OPENAI_API_KEY não configurada." });
+        }
+        const url = await generateReelSlideImage(scene_description);
+        return res.status(200).json({ ok: true, url });
+      }
+
+      if (action === "build_reel_video") {
+        const { slide_image_urls, slide_texts } = req.body;
+        if (!Array.isArray(slide_image_urls) || !Array.isArray(slide_texts)) {
+          return res.status(400).json({ error: "slide_image_urls e slide_texts (arrays) são obrigatórios." });
+        }
+        if (!process.env.SHOTSTACK_API_KEY) {
+          return res.status(500).json({ error: "SHOTSTACK_API_KEY não configurada." });
+        }
+        const timeline = buildShotstackTimeline(slide_image_urls, slide_texts);
+        const renderId = await submitShotstackRender(timeline);
+        return res.status(200).json({ ok: true, render_id: renderId });
+      }
+
+      if (action === "check_reel_video_status") {
+        const { render_id } = req.body;
+        if (!render_id) return res.status(400).json({ error: "render_id é obrigatório." });
+        const { status, url } = await checkShotstackRenderStatus(render_id);
+        if (status !== "done") return res.status(200).json({ ok: true, status, ready: false });
+        // Já pronto no Shotstack — copia pro nosso Blob antes de devolver,
+        // para a Instagram Graph API buscar de uma URL que controlamos.
+        const blobUrl = await copyVideoToBlob(url);
+        return res.status(200).json({ ok: true, status: "done", ready: true, video_url: blobUrl });
+      }
+
+      if (action === "create_reel_container") {
+        const { video_url, caption } = req.body;
+        if (!video_url) return res.status(400).json({ error: "video_url é obrigatório." });
+        if (!process.env.FACEBOOK_PAGE_ACCESS_TOKEN || !process.env.FACEBOOK_PAGE_ID) {
+          return res.status(500).json({ error: "FACEBOOK_PAGE_ACCESS_TOKEN ou FACEBOOK_PAGE_ID não configurados." });
+        }
+        const igAccountId = await getInstagramAccountId();
+        const containerId = await createReelContainer(igAccountId, video_url, caption || "");
+        return res.status(200).json({ ok: true, container_id: containerId, ig_account_id: igAccountId });
+      }
+
+      if (action === "check_and_publish_reel") {
+        const { container_id, ig_account_id } = req.body;
+        if (!container_id || !ig_account_id) {
+          return res.status(400).json({ error: "container_id e ig_account_id são obrigatórios." });
+        }
+        const result = await checkAndPublishReel(ig_account_id, container_id);
+        return res.status(200).json({ ok: true, ...result });
       }
     } catch (err) {
-      console.error("Erro na análise/card do Instagram:", err);
+      console.error(`Erro na ação de Reels "${action}":`, err);
       return res.status(500).json({ error: err.message });
     }
   }
