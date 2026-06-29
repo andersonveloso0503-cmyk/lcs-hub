@@ -62,33 +62,71 @@ export default function AccountAuditCard({ campaigns }) {
       return;
     }
 
-    let payload = null;
     if (action.type === "pause_campaign") {
       if (!confirm(`Pausar a campanha "${campaign.name}"? Ela para de gerar cliques e gastos imediatamente.`)) return;
-      payload = { action: "pause_campaign", campaign_id: campaign.campaign_id };
+      await runSimpleApply({ action: "pause_campaign", campaign_id: campaign.campaign_id }, index);
     } else if (action.type === "update_budget") {
       if (!campaign.budget_resource_name) {
         setError("Esta campanha não tem orçamento próprio identificado.");
         return;
       }
       if (!confirm(`Alterar orçamento diário de "${campaign.name}" de R$ ${campaign.budget_amount.toFixed(2)} para R$ ${action.new_amount.toFixed(2)}?`)) return;
-      payload = {
-        action: "update_budget",
-        budget_resource_name: campaign.budget_resource_name,
-        new_amount: action.new_amount,
-      };
+      await runSimpleApply(
+        { action: "update_budget", budget_resource_name: campaign.budget_resource_name, new_amount: action.new_amount },
+        index
+      );
     } else if (action.type === "update_bidding_strategy") {
       const label = action.strategy === "MAXIMIZE_CONVERSIONS" ? "Maximizar Conversões" : "Maximizar Cliques";
       if (!confirm(`Mudar a estratégia de lance de "${campaign.name}" para ${label}?`)) return;
-      payload = {
-        action: "update_bidding_strategy",
-        campaign_id: campaign.campaign_id,
-        strategy: action.strategy,
-      };
-    } else {
-      return; // tipo de ação não reconhecido — não deveria chegar aqui, já que o backend só preenche "action" para tipos válidos
-    }
+      await runSimpleApply(
+        { action: "update_bidding_strategy", campaign_id: campaign.campaign_id, strategy: action.strategy },
+        index
+      );
+    } else if (action.type === "add_negative_keyword") {
+      if (!confirm(`Adicionar "${action.term}" como palavra-chave negativa na campanha "${campaign.name}"?`)) return;
+      await runSimpleApply(
+        { action: "add_negative_keyword", campaign_id: campaign.campaign_id, term: action.term },
+        index
+      );
+    } else if (action.type === "create_ad") {
+      // create_ad é em 2 passos no backend: 1) gera o texto via IA
+      // (generate_ad_copy), 2) cria o anúncio de fato (create_ad) — sempre
+      // como PAUSADO, mesma regra de segurança do AdCreator.jsx manual.
+      if (!confirm(`Gerar e criar (pausado) um novo anúncio para "${campaign.name}" com foco em "${action.service_label}"? Você revisa e ativa manualmente no Google Ads depois.`)) return;
+      setApplyingIndex(index);
+      setError(null);
+      try {
+        const copyRes = await fetch("/api/google-ads-fetch-real", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-panel-trigger": "lcs-hub-optimizations-panel" },
+          body: JSON.stringify({ action: "generate_ad_copy", service_label: action.service_label }),
+        });
+        const copyData = await copyRes.json();
+        if (!copyRes.ok) throw new Error(copyData.error || "Erro ao gerar texto do anúncio");
 
+        const createRes = await fetch("/api/google-ads-fetch-real", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-panel-trigger": "lcs-hub-optimizations-panel" },
+          body: JSON.stringify({
+            action: "create_ad",
+            campaign_id: campaign.campaign_id,
+            headlines: copyData.headlines,
+            descriptions: copyData.descriptions,
+          }),
+        });
+        const createData = await createRes.json();
+        if (!createRes.ok) throw new Error(createData.error || "Erro ao criar anúncio");
+        setAppliedIndexes((prev) => new Set(prev).add(index));
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setApplyingIndex(null);
+      }
+    }
+  }
+
+  /** Aplica uma ação simples (1 chamada só) e marca como aplicada no sucesso. */
+  async function runSimpleApply(payload, index) {
     setApplyingIndex(index);
     setError(null);
     try {
