@@ -168,3 +168,29 @@ export async function editImageOnBuffer(bufferPostIds, imageUrl, isInstagram = t
     return { ok: false, error: err.message };
   }
 }
+
+/**
+ * Reagenda um ou mais posts já existentes no Buffer para uma nova data —
+ * usa a mesma mutation editPost do backend (action: "editDate"), passando
+ * só o novo dueAt em ISO 8601. Útil quando um post (ou semana inteira) foi
+ * agendado para a data errada e precisa ser movido sem recriar do zero.
+ */
+export async function editDateOnBuffer(bufferPostIds, dueAt) {
+  try {
+    const res = await fetch("/api/buffer-manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "editDate", bufferPostIds, dueAt }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      const errorMsg = data.results
+        ? data.results.map((r) => r.error).filter(Boolean).join(" | ")
+        : data.error || "Erro ao reagendar no Buffer";
+      return { ok: false, error: errorMsg };
+    }
+    return { ok: true, results: data.results };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
