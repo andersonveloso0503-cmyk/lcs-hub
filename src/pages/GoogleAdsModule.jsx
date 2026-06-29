@@ -5,6 +5,7 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "../firebase/config";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
 import ABTestCard from "../googleads/ABTestCard";
+import AccountAuditCard from "../googleads/AccountAuditCard";
 
 const BIDDING_LABELS = {
   MAXIMIZE_CONVERSIONS: "Max. conversões",
@@ -245,6 +246,8 @@ export default function GoogleAdsModule() {
           Otimizações
         </Link>
       </div>
+
+      <AccountAuditCard />
 
       {error && (
         <div className="card error-card">
