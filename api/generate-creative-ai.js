@@ -344,7 +344,7 @@ function buildShotstackTimeline(slideImageUrls, slideTexts, slideDuration = 4) {
     start: i * slideDuration + 0.3, // pequeno delay para o texto aparecer depois da imagem
     length: slideDuration - 0.3,
     position: "bottom",
-    offset: { y: -0.05 }, // pequeno respiro da borda inferior, igual ao exemplo oficial do Shotstack
+    offset: { y: -0.1 }, // sobe um pouco mais (era -0.05) -- texto ainda colava demais na borda
     transition: { in: "fade", out: "fade" },
   }));
 
