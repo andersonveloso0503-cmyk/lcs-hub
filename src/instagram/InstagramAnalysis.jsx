@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Sparkles, RefreshCw, Check, X, AlertTriangle, Image as ImageIcon, Download, Lightbulb, Copy, CheckCheck } from "lucide-react";
+import { Sparkles, RefreshCw, Check, X, AlertTriangle, Image as ImageIcon, Download, Lightbulb, Copy, CheckCheck, Wand2 } from "lucide-react";
+import { generateCaption, generateCreativeAI, uploadImage } from "./api";
 
 const SERVICE_OPTIONS = [
   "portaria de condomínio",
@@ -8,20 +9,40 @@ const SERVICE_OPTIONS = [
   "segurança patrimonial",
 ];
 
+// Mesmo mapeamento usado no PostGenerator/WeeklyPlanner, pra escolher a
+// cena certa no generate-creative-ai.js a partir do serviço em destaque.
+const SERVICE_TO_AI_KEY = {
+  "Limpeza e Conservação": "Limpeza",
+  "Portaria e Recepção": "Portaria",
+  "Facilities e Manutenção": "Facilities",
+  "Condomínios e Síndicos": "Condomínios",
+  "Empresas / Escritórios": "Empresas",
+};
+const DEFAULT_SERVICE = "Limpeza e Conservação";
+
 /**
  * Botão + painel de sugestão de correção para um item específico do
- * relatório de análise. Ao clicar, pede pra IA uma recomendação concreta
- * (texto pronto pra copiar quando aplicável, ou passo a passo manual).
- * Nada é alterado automaticamente no Instagram — a Graph API não permite
- * editar bio/categoria via API para esse tipo de conta, e mesmo quando
- * permitisse, a ideia é o usuário revisar antes de aplicar.
+ * relatório de análise. Comportamento depende do action_type retornado
+ * pela IA:
+ * - "copy_text" (bio, categoria, link) → mostra texto + botão "Copiar".
+ *   A Graph API não permite editar esses campos via API para este tipo de
+ *   conta, então sempre fica manual.
+ * - "create_content" (poucos posts, falta variedade, etc.) → mostra botão
+ *   "Corrigir com IA" que gera legenda + imagem automaticamente e salva
+ *   como RASCUNHO (nunca publica direto — aprovação fica em "Meus Posts").
+ * - "manual_action" → só explicação, sem botão de ação.
  */
-function FixSuggestion({ item, profile }) {
+function FixSuggestion({ item, profile, onSavePost }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [suggestion, setSuggestion] = useState(null);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
+
+  // Estado da correção automática (create_content)
+  const [applying, setApplying] = useState(false);
+  const [applyStep, setApplyStep] = useState(""); // texto de progresso
+  const [applyResult, setApplyResult] = useState(null); // { ok, error }
 
   async function handleClick() {
     if (open) {
@@ -53,6 +74,52 @@ function FixSuggestion({ item, profile }) {
     navigator.clipboard.writeText(suggestion.ready_to_copy);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  /**
+   * Corrige automaticamente quando a ação é "criar conteúdo": gera legenda
+   * + imagem via IA (mesmas funções já usadas no Gerador de Post manual) e
+   * salva tudo como rascunho — nunca publica sem revisão humana.
+   */
+  async function handleApplyWithAI() {
+    setApplying(true);
+    setApplyResult(null);
+    const service = DEFAULT_SERVICE;
+    const aiKey = SERVICE_TO_AI_KEY[service] || "Limpeza";
+
+    try {
+      setApplyStep("Gerando legenda...");
+      const captionResult = await generateCaption({
+        service,
+        tone: "Profissional e confiante",
+        goal: "Dica profissional",
+        context: `Post criado a partir da correção sugerida pela Análise IA: "${item.title}" — ${item.detail}`,
+      });
+      if (!captionResult.ok) throw new Error(captionResult.error);
+
+      setApplyStep("Gerando imagem...");
+      const imageResult = await generateCreativeAI({ service: aiKey, headline: aiKey, format: "post", provider: "openai" });
+      if (!imageResult.ok) throw new Error(imageResult.error);
+
+      setApplyStep("Salvando rascunho...");
+      const upload = await uploadImage(imageResult.imageBase64, `correcao-ia-${Date.now()}.png`);
+      if (!upload.ok) throw new Error(upload.error);
+
+      await onSavePost({
+        service,
+        caption: captionResult.caption,
+        imageUrl: upload.url,
+        status: "rascunho",
+        origin: "analise_ia_correcao",
+      });
+
+      setApplyResult({ ok: true });
+    } catch (err) {
+      setApplyResult({ ok: false, error: err.message });
+    } finally {
+      setApplying(false);
+      setApplyStep("");
+    }
   }
 
   return (
@@ -108,26 +175,62 @@ function FixSuggestion({ item, profile }) {
                 </div>
               )}
 
-              {suggestion.ready_to_copy && (
-                <button
-                  className="btn btn-teal btn-sm"
-                  onClick={handleCopy}
-                  style={{ marginTop: 10, fontSize: 12 }}
-                >
-                  {copied ? (
-                    <>
-                      <CheckCheck size={13} style={{ marginRight: 6 }} /> Copiado!
-                    </>
-                  ) : (
-                    <>
-                      <Copy size={13} style={{ marginRight: 6 }} /> Copiar texto
-                    </>
-                  )}
-                </button>
+              <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                {/* copy_text: texto pronto pra colar manualmente no Instagram */}
+                {suggestion.action_type === "copy_text" && suggestion.ready_to_copy && (
+                  <button className="btn btn-teal btn-sm" onClick={handleCopy} style={{ fontSize: 12 }}>
+                    {copied ? (
+                      <>
+                        <CheckCheck size={13} style={{ marginRight: 6 }} /> Copiado!
+                      </>
+                    ) : (
+                      <>
+                        <Copy size={13} style={{ marginRight: 6 }} /> Copiar texto
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {/* create_content: gera e salva o conteúdo automaticamente como rascunho */}
+                {suggestion.action_type === "create_content" && (
+                  <button
+                    className="btn btn-gads btn-sm"
+                    onClick={handleApplyWithAI}
+                    disabled={applying || applyResult?.ok}
+                    style={{ fontSize: 12 }}
+                  >
+                    {applying ? (
+                      <>
+                        <RefreshCw size={13} className="spin" style={{ marginRight: 6 }} /> {applyStep || "Aplicando..."}
+                      </>
+                    ) : applyResult?.ok ? (
+                      <>
+                        <CheckCheck size={13} style={{ marginRight: 6 }} /> Rascunho criado!
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 size={13} style={{ marginRight: 6 }} /> Corrigir com IA
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+
+              {applyResult?.ok && (
+                <p style={{ marginTop: 8, marginBottom: 0, fontSize: 12, color: "var(--teal)" }}>
+                  ✅ Um rascunho foi criado na aba "Meus Posts" — revise e publique quando quiser.
+                </p>
+              )}
+              {applyResult?.error && (
+                <p style={{ marginTop: 8, marginBottom: 0, fontSize: 12, color: "var(--pink)" }}>
+                  ⚠️ {applyResult.error}
+                </p>
               )}
 
               <p className="muted" style={{ marginTop: 10, marginBottom: 0, fontSize: 11 }}>
-                Revise antes de aplicar — você decide e cola/ajusta manualmente no Instagram.
+                {suggestion.action_type === "create_content"
+                  ? "A IA gera o conteúdo e salva como rascunho — nada é publicado sem sua aprovação."
+                  : "Revise antes de aplicar — você decide e cola/ajusta manualmente no Instagram."}
               </p>
             </>
           )}
@@ -142,7 +245,7 @@ function FixSuggestion({ item, profile }) {
  * como referência: itens ❌ (problema) e ✅ (ok), com resumo final de
  * prioridade. Busca dados reais do Instagram via Graph API, server-side.
  */
-function ProfileAnalysis() {
+function ProfileAnalysis({ onSavePost }) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -233,7 +336,7 @@ function ProfileAnalysis() {
 
                     {/* Botão de sugestão só aparece para itens marcados como problema */}
                     {item.status === "problema" && (
-                      <FixSuggestion item={item} profile={result.profile} />
+                      <FixSuggestion item={item} profile={result.profile} onSavePost={onSavePost} />
                     )}
                   </div>
                 </div>
@@ -374,10 +477,10 @@ function DarkCardGenerator() {
   );
 }
 
-export default function InstagramAnalysis() {
+export default function InstagramAnalysis({ onSavePost }) {
   return (
     <div>
-      <ProfileAnalysis />
+      <ProfileAnalysis onSavePost={onSavePost} />
       <DarkCardGenerator />
     </div>
   );
