@@ -51,7 +51,17 @@ export default function PostsList({ posts, onDelete, onUpdate }) {
 
     try {
       if (post.bufferPostIds?.length > 0) {
-        const result = await editDateOnBuffer(post.bufferPostIds, dueAtIso);
+        // O Buffer exige que o post continue tendo texto + mídia + tipo
+        // definidos mesmo numa edição que só muda a data — por isso
+        // reenviamos caption e imageUrl junto com a nova data (ver
+        // comentário em editDateOnBuffer / buffer-manage.js).
+        const result = await editDateOnBuffer(
+          post.bufferPostIds,
+          dueAtIso,
+          post.caption,
+          post.imageUrl,
+          true
+        );
         if (!result.ok) {
           setActionError(`Não foi possível reagendar no Buffer: ${result.error}`);
           setSavingDateId(null);
