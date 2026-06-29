@@ -257,7 +257,11 @@ Style: clean, editorial, professional, high contrast, suitable for a B2B service
 
 import { put } from "@vercel/blob";
 
-const SHOTSTACK_API_URL = "https://api.shotstack.io/edit/v1";
+// Sandbox (não Production) — a Sandbox API Key só funciona neste host.
+// Vídeos renderizados em sandbox saem com marca d'água "Shotstack" e tem
+// limite mensal de renders gratuitos; trocar para a chave/host de
+// Production quando o fluxo estiver validado e for usado de verdade.
+const SHOTSTACK_API_URL = "https://api.shotstack.io/stage";
 
 /**
  * Sobe um buffer/base64 para o Vercel Blob e retorna a URL pública —
