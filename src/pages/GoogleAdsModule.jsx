@@ -85,7 +85,10 @@ export default function GoogleAdsModule() {
       campaign_id: suggestion.campaign_id,
       term: suggestion.term,
     });
-    if (ok) handleDismiss(suggestion.term);
+    // O backend já remove a sugestão do Firestore quando dá sucesso — aqui
+    // só atualizamos o estado local para o efeito visual imediato (sem
+    // esperar o próximo snapshot via onSnapshot chegar).
+    if (ok) setDismissed((prev) => new Set(prev).add(suggestion.term));
   }
 
   async function handlePauseCampaign(campaign) {
@@ -127,8 +130,24 @@ export default function GoogleAdsModule() {
     setTimeout(() => setCopiedTerm(null), 1500);
   }
 
-  function handleDismiss(term) {
-    setDismissed((prev) => new Set(prev).add(term));
+  async function handleDismiss(suggestion) {
+    // Persiste o descarte no backend (remove do array no Firestore) —
+    // sem isso, a sugestão reaparecia ao recarregar a página, já que o
+    // estado "dismissed" só existia em memória local antes desta correção.
+    setDismissed((prev) => new Set(prev).add(suggestion.term)); // feedback visual imediato, antes da resposta do servidor
+    try {
+      await fetch("/api/google-ads-fetch-real", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-panel-trigger": "lcs-hub-optimizations-panel" },
+        body: JSON.stringify({
+          action: "dismiss_negative_keyword",
+          campaign_id: suggestion.campaign_id,
+          term: suggestion.term,
+        }),
+      });
+    } catch (err) {
+      console.error("Erro ao persistir descarte:", err);
+    }
   }
 
   const visibleSuggestions = negativeKeywordSuggestions.filter((s) => !dismissed.has(s.term));
@@ -377,7 +396,7 @@ export default function GoogleAdsModule() {
                     {copiedTerm === s.term ? <Check size={13} /> : <Copy size={13} />}
                     {copiedTerm === s.term ? "Copiado" : "Copiar"}
                   </button>
-                  <button className="btn btn-outline btn-sm" onClick={() => handleDismiss(s.term)}>
+                  <button className="btn btn-outline btn-sm" onClick={() => handleDismiss(s)}>
                     Descartar
                   </button>
                 </div>
