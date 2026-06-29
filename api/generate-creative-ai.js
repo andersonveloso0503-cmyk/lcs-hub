@@ -211,6 +211,61 @@ Responda APENAS este JSON, sem texto antes ou depois:
 }
 
 /**
+ * Gera uma sugestão concreta de correção para um item específico apontado
+ * na análise de perfil (ex: bio fraca, sem categoria, poucos posts). Não
+ * altera nada automaticamente — a Instagram Graph API não permite editar
+ * bio/categoria/foto de perfil de contas business via API, então o usuário
+ * sempre revisa e aplica manualmente no app do Instagram.
+ */
+async function suggestFixForItem(item, profile) {
+  const prompt = `Você é consultor de Instagram para pequenos negócios B2B no Brasil, ajudando a empresa "LCS Terceirização" (limpeza, portaria, facilities, Porto Alegre RS).
+
+Um relatório de análise de perfil apontou o seguinte problema:
+- Título: "${item.title}"
+- Detalhe: "${item.detail}"
+
+Contexto atual do perfil:
+- Username: @${profile?.username || "desconhecido"}
+- Nome: ${profile?.name || "(não definido)"}
+- Biografia atual: "${profile?.biography || "(vazia)"}"
+- Website na bio: ${profile?.website || "(não configurado)"}
+
+Gere uma sugestão prática e específica para resolver esse problema. Se envolver texto pronto para usar (ex: nova biografia, nova categoria sugerida, ideia de CTA), escreva o texto EXATO sugerido, pronto para copiar e colar. Se for uma ação fora do Instagram (ex: "poste com mais frequência"), explique o passo a passo prático.
+
+Responda APENAS este JSON, sem texto antes ou depois:
+{
+  "suggestion_text": "explicação curta da recomendação (máx 250 caracteres)",
+  "ready_to_copy": "texto pronto para copiar e colar (ex: nova bio), ou null se não se aplicar",
+  "action_type": "copy_text" | "manual_action" | "create_content"
+}`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 600,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `Erro ${res.status} ao gerar sugestão`);
+
+  const text = data.content?.[0]?.text || "{}";
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    throw new Error("A IA retornou um formato inválido na sugestão de correção.");
+  }
+}
+
+/**
  * Gera um criativo "card escuro" via DALL-E (gpt-image-1.5), com estética
  * próxima dos exemplos de referência do usuário: fundo navy/escuro, foto
  * de contexto ao fundo, headline grande em destaque, faixa de WhatsApp.
@@ -259,7 +314,7 @@ export default async function handler(req, res) {
   // de um arquivo próprio, para não passar do limite de 12 funções
   // serverless do plano Hobby da Vercel) — ver detalhes nas funções
   // analyzeProfileWithAI/generateDarkCardCreative abaixo.
-  if (action === "analyze_profile" || action === "generate_dark_card") {
+  if (action === "analyze_profile" || action === "generate_dark_card" || action === "suggest_fix") {
     try {
       if (action === "analyze_profile") {
         if (!process.env.FACEBOOK_PAGE_ACCESS_TOKEN || !process.env.FACEBOOK_PAGE_ID) {
@@ -285,6 +340,18 @@ export default async function handler(req, res) {
         }
         const imageBase64 = await generateDarkCardCreative(service, headline, subtext || "");
         return res.status(200).json({ ok: true, imageBase64 });
+      }
+
+      if (action === "suggest_fix") {
+        const { item, profile } = req.body || {};
+        if (!item || !item.title) {
+          return res.status(400).json({ error: "item (com title/detail) é obrigatório." });
+        }
+        if (!process.env.ANTHROPIC_API_KEY) {
+          return res.status(500).json({ error: "ANTHROPIC_API_KEY não configurada." });
+        }
+        const suggestion = await suggestFixForItem(item, profile);
+        return res.status(200).json({ ok: true, ...suggestion });
       }
     } catch (err) {
       console.error("Erro na análise/card do Instagram:", err);
