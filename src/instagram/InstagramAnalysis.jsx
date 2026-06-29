@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sparkles, RefreshCw, Check, X, AlertTriangle, Image as ImageIcon, Download } from "lucide-react";
+import { Sparkles, RefreshCw, Check, X, AlertTriangle, Image as ImageIcon, Download, Lightbulb, Copy, CheckCheck } from "lucide-react";
 
 const SERVICE_OPTIONS = [
   "portaria de condomínio",
@@ -7,6 +7,135 @@ const SERVICE_OPTIONS = [
   "facilities e manutenção predial",
   "segurança patrimonial",
 ];
+
+/**
+ * Botão + painel de sugestão de correção para um item específico do
+ * relatório de análise. Ao clicar, pede pra IA uma recomendação concreta
+ * (texto pronto pra copiar quando aplicável, ou passo a passo manual).
+ * Nada é alterado automaticamente no Instagram — a Graph API não permite
+ * editar bio/categoria via API para esse tipo de conta, e mesmo quando
+ * permitisse, a ideia é o usuário revisar antes de aplicar.
+ */
+function FixSuggestion({ item, profile }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [suggestion, setSuggestion] = useState(null);
+  const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  async function handleClick() {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (suggestion) return; // já buscou antes, não busca de novo
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/generate-creative-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "suggest_fix", item, profile }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erro ao gerar sugestão");
+      setSuggestion(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleCopy() {
+    if (!suggestion?.ready_to_copy) return;
+    navigator.clipboard.writeText(suggestion.ready_to_copy);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button
+        className="btn btn-outline btn-sm"
+        onClick={handleClick}
+        style={{ fontSize: 12, padding: "4px 10px" }}
+      >
+        <Lightbulb size={12} style={{ marginRight: 5 }} />
+        {open ? "Ocultar sugestão" : "Como corrigir?"}
+      </button>
+
+      {open && (
+        <div
+          style={{
+            marginTop: 8,
+            padding: 12,
+            borderRadius: 10,
+            background: "#fff",
+            border: "1px solid var(--gray-light)",
+          }}
+        >
+          {loading && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--gray)" }}>
+              <RefreshCw size={13} className="spin" /> Gerando sugestão...
+            </div>
+          )}
+
+          {error && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--pink)" }}>
+              <AlertTriangle size={14} /> {error}
+            </div>
+          )}
+
+          {suggestion && (
+            <>
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5 }}>{suggestion.suggestion_text}</p>
+
+              {suggestion.ready_to_copy && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: 10,
+                    borderRadius: 8,
+                    background: "var(--bg)",
+                    fontSize: 13,
+                    lineHeight: 1.5,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {suggestion.ready_to_copy}
+                </div>
+              )}
+
+              {suggestion.ready_to_copy && (
+                <button
+                  className="btn btn-teal btn-sm"
+                  onClick={handleCopy}
+                  style={{ marginTop: 10, fontSize: 12 }}
+                >
+                  {copied ? (
+                    <>
+                      <CheckCheck size={13} style={{ marginRight: 6 }} /> Copiado!
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={13} style={{ marginRight: 6 }} /> Copiar texto
+                    </>
+                  )}
+                </button>
+              )}
+
+              <p className="muted" style={{ marginTop: 10, marginBottom: 0, fontSize: 11 }}>
+                Revise antes de aplicar — você decide e cola/ajusta manualmente no Instagram.
+              </p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * Análise de perfil — no mesmo formato do relatório do Ravia.app usado
@@ -86,22 +215,27 @@ function ProfileAnalysis() {
               <div
                 key={i}
                 style={{
-                  display: "flex",
-                  gap: 10,
                   padding: "10px 12px",
                   borderRadius: 10,
                   background: item.status === "problema" ? "#FFF0F6" : "#ECFEFF",
                   border: `1px solid ${item.status === "problema" ? "#F8BBD0" : "var(--teal)"}`,
                 }}
               >
-                {item.status === "problema" ? (
-                  <X size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--pink)" }} />
-                ) : (
-                  <Check size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--teal)" }} />
-                )}
-                <div>
-                  <strong style={{ fontSize: 13 }}>{item.title}</strong>
-                  <p className="muted" style={{ margin: "2px 0 0", fontSize: 12 }}>{item.detail}</p>
+                <div style={{ display: "flex", gap: 10 }}>
+                  {item.status === "problema" ? (
+                    <X size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--pink)" }} />
+                  ) : (
+                    <Check size={16} style={{ flexShrink: 0, marginTop: 1, color: "var(--teal)" }} />
+                  )}
+                  <div style={{ flex: 1 }}>
+                    <strong style={{ fontSize: 13 }}>{item.title}</strong>
+                    <p className="muted" style={{ margin: "2px 0 0", fontSize: 12 }}>{item.detail}</p>
+
+                    {/* Botão de sugestão só aparece para itens marcados como problema */}
+                    {item.status === "problema" && (
+                      <FixSuggestion item={item} profile={result.profile} />
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
