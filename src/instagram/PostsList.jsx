@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
-import { Calendar, Trash2, ExternalLink, ImagePlus, Loader2 } from "lucide-react";
+import { Calendar, Trash2, ExternalLink, ImagePlus, Loader2, CalendarClock } from "lucide-react";
 import { formatScheduledDate } from "./weekSchedule";
-import { deleteFromBuffer, editImageOnBuffer, uploadImage } from "./api";
+import { deleteFromBuffer, editImageOnBuffer, editDateOnBuffer, uploadImage } from "./api";
 
 const STATUS_FILTERS = [
   { value: "todos", label: "Todos" },
@@ -23,6 +23,49 @@ export default function PostsList({ posts, onDelete, onUpdate }) {
   const [actionError, setActionError] = useState("");
   const fileInputRef = useRef(null);
   const [targetPostForReplace, setTargetPostForReplace] = useState(null);
+  const [reschedulingId, setReschedulingId] = useState(null); // id do post cujo seletor de data está aberto
+  const [savingDateId, setSavingDateId] = useState(null); // id do post salvando a nova data (mostra spinner)
+  const [newDateValue, setNewDateValue] = useState(""); // valor do <input type="datetime-local"> aberto
+
+  function handleOpenReschedule(post) {
+    setActionError("");
+    // datetime-local não aceita o "Z" do ISO 8601 nem timezone — precisa
+    // do formato "YYYY-MM-DDTHH:mm" em horário local do navegador para
+    // pré-popular o campo com a data atual do post.
+    const current = post.scheduledAt ? new Date(post.scheduledAt) : new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const localValue = `${current.getFullYear()}-${pad(current.getMonth() + 1)}-${pad(current.getDate())}T${pad(current.getHours())}:${pad(current.getMinutes())}`;
+    setNewDateValue(localValue);
+    setReschedulingId(post.id);
+  }
+
+  async function handleSaveReschedule(post) {
+    if (!newDateValue) return;
+    setActionError("");
+    setSavingDateId(post.id);
+
+    // new Date(datetime-local value) já interpreta como horário local do
+    // navegador e .toISOString() converte para UTC — formato exigido pelo
+    // campo dueAt da mutation editPost do Buffer.
+    const dueAtIso = new Date(newDateValue).toISOString();
+
+    try {
+      if (post.bufferPostIds?.length > 0) {
+        const result = await editDateOnBuffer(post.bufferPostIds, dueAtIso);
+        if (!result.ok) {
+          setActionError(`Não foi possível reagendar no Buffer: ${result.error}`);
+          setSavingDateId(null);
+          return;
+        }
+      }
+      await onUpdate(post.id, { scheduledAt: dueAtIso });
+      setReschedulingId(null);
+    } catch (err) {
+      setActionError(`Erro ao reagendar: ${err.message}`);
+    } finally {
+      setSavingDateId(null);
+    }
+  }
 
   const filtered = filter === "todos" ? posts : posts.filter((p) => p.status === filter);
 
@@ -161,6 +204,26 @@ export default function PostsList({ posts, onDelete, onUpdate }) {
                     <Calendar size={12} /> {formatScheduledDate(post.scheduledAt)}
                   </div>
                 )}
+                {reschedulingId === post.id && (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "8px 0" }}>
+                    <input
+                      type="datetime-local"
+                      value={newDateValue}
+                      onChange={(e) => setNewDateValue(e.target.value)}
+                      style={{ flex: 1, padding: "6px 8px", borderRadius: 8, border: "1px solid var(--gray-light)", fontSize: 13 }}
+                    />
+                    <button
+                      className="btn btn-teal btn-sm"
+                      onClick={() => handleSaveReschedule(post)}
+                      disabled={savingDateId === post.id}
+                    >
+                      {savingDateId === post.id ? "Salvando..." : "Salvar"}
+                    </button>
+                    <button className="btn btn-outline btn-sm" onClick={() => setReschedulingId(null)}>
+                      Cancelar
+                    </button>
+                  </div>
+                )}
                 <div className="post-list-actions">
                   {post.imageUrl && (
                     <a
@@ -187,6 +250,15 @@ export default function PostsList({ posts, onDelete, onUpdate }) {
                       </>
                     )}
                   </button>
+                  {post.status === "agendado" && (
+                    <button
+                      className="btn btn-outline btn-sm"
+                      onClick={() => handleOpenReschedule(post)}
+                      disabled={isDeleting || isReplacing}
+                    >
+                      <CalendarClock size={12} /> Alterar data
+                    </button>
+                  )}
                   <button
                     className="btn btn-outline btn-sm"
                     onClick={() => handleDelete(post)}
