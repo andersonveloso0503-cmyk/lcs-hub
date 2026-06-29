@@ -361,13 +361,19 @@ function ProfileAnalysis({ onSavePost }) {
  * referências enviadas pelo usuário (fundo navy, headline grande,
  * faixa de contato), separado do gerador padrão (cards azul/bordô/dourado).
  */
-function DarkCardGenerator() {
+function DarkCardGenerator({ addPhoto }) {
   const [service, setService] = useState(SERVICE_OPTIONS[0]);
   const [headline, setHeadline] = useState("");
   const [subtext, setSubtext] = useState("");
   const [generating, setGenerating] = useState(false);
   const [image, setImage] = useState(null);
   const [error, setError] = useState(null);
+
+  // Status do salvamento automático no Banco de Temas, que acontece em
+  // seguida à geração da imagem, sem precisar de clique extra.
+  const [savingToBank, setSavingToBank] = useState(false);
+  const [bankSaveError, setBankSaveError] = useState(null);
+  const [savedToBank, setSavedToBank] = useState(false);
 
   async function handleGenerate() {
     if (!headline.trim()) {
@@ -376,6 +382,8 @@ function DarkCardGenerator() {
     }
     setGenerating(true);
     setError(null);
+    setSavedToBank(false);
+    setBankSaveError(null);
     try {
       const res = await fetch("/api/generate-creative-ai", {
         method: "POST",
@@ -385,10 +393,33 @@ function DarkCardGenerator() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Erro ao gerar imagem");
       setImage(data.imageBase64);
+      // Salva automaticamente no Banco de Temas, sem exigir clique extra.
+      saveToThemeBank(data.imageBase64);
     } catch (err) {
       setError(err.message);
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function saveToThemeBank(imageBase64) {
+    setSavingToBank(true);
+    setBankSaveError(null);
+    try {
+      const upload = await uploadImage(imageBase64, `card-escuro-${Date.now()}.png`);
+      if (!upload.ok) throw new Error(upload.error || "Erro no upload da imagem");
+      await addPhoto({
+        service,
+        imageUrl: upload.url,
+        headline,
+        subtext: subtext || "",
+        source: "card_escuro",
+      });
+      setSavedToBank(true);
+    } catch (err) {
+      setBankSaveError(err.message);
+    } finally {
+      setSavingToBank(false);
     }
   }
 
@@ -468,6 +499,25 @@ function DarkCardGenerator() {
       {image && (
         <div style={{ marginTop: 16 }}>
           <img src={image} alt="Criativo gerado" style={{ width: "100%", maxWidth: 360, borderRadius: 12, display: "block", margin: "0 auto" }} />
+
+          <div style={{ textAlign: "center", marginTop: 10, fontSize: 12 }}>
+            {savingToBank && (
+              <span className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <RefreshCw size={12} className="spin" /> Salvando no Banco de Temas...
+              </span>
+            )}
+            {savedToBank && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--teal)" }}>
+                <CheckCheck size={13} /> Salvo no Banco de Temas
+              </span>
+            )}
+            {bankSaveError && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--pink)" }}>
+                <AlertTriangle size={13} /> Não foi possível salvar no Banco de Temas: {bankSaveError}
+              </span>
+            )}
+          </div>
+
           <button className="btn btn-outline btn-sm" onClick={handleDownload} style={{ marginTop: 10, display: "block", marginLeft: "auto", marginRight: "auto" }}>
             <Download size={13} style={{ marginRight: 6 }} /> Baixar Imagem
           </button>
@@ -477,11 +527,11 @@ function DarkCardGenerator() {
   );
 }
 
-export default function InstagramAnalysis({ onSavePost }) {
+export default function InstagramAnalysis({ onSavePost, addPhoto }) {
   return (
     <div>
       <ProfileAnalysis onSavePost={onSavePost} />
-      <DarkCardGenerator />
+      <DarkCardGenerator addPhoto={addPhoto} />
     </div>
   );
 }
