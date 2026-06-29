@@ -118,7 +118,7 @@ export default function InstagramModule() {
         <PostGenerator themeBankPhotos={photos} onSavePost={savePost} />
       )}
 
-      {tab === "analysis" && <InstagramAnalysis />}
+      {tab === "analysis" && <InstagramAnalysis onSavePost={savePost} />}
 
       {tab === "editor" && <PhotoEditor onSaveToBank={handleSaveToBank} />}
 
