@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Award, RefreshCw, AlertTriangle } from "lucide-react";
+import { Award, RefreshCw, AlertTriangle, Check } from "lucide-react";
 
 const CATEGORY_LABELS = {
   criativo: "🎨 Criativo",
@@ -11,18 +11,23 @@ const CATEGORY_LABELS = {
 const IMPACT_COLOR = { alto: "#C62828", medio: "#B8860B", baixo: "var(--gray)" };
 
 /**
- * Auditoria geral e estratégica da conta — diferente das "Recomendações
- * da IA" (que olham campanha por campanha), esta olha o panorama inteiro
- * de uma vez: combina estrutura, métricas e Índice de Qualidade
- * (Quality Score) agregado de todas as palavras-chave, para identificar
- * padrões sistêmicos que afetam a posição dos anúncios como um todo —
- * o que o usuário pediu como "melhorar a campanha em geral para ficar
- * bem posicionado nas pesquisas".
+ * Auditoria geral e estratégica da conta — visão única de recomendações
+ * (substituiu o antigo card separado "Recomendações da IA" + esta
+ * auditoria, que eram redundantes). Combina estrutura, métricas e Índice
+ * de Qualidade (Quality Score) agregado de todas as palavras-chave para
+ * identificar padrões sistêmicos que afetam a posição dos anúncios como
+ * um todo. Cada ação prioritária, quando corresponder a uma ação
+ * automatizável (pausar, ajustar orçamento, mudar estratégia de lance),
+ * ganha um botão "Aplicar" — ações qualitativas (ex.: melhorar a página
+ * de destino) ficam só como texto, sem botão, porque não há como
+ * automatizar isso via API.
  */
-export default function AccountAuditCard() {
+export default function AccountAuditCard({ campaigns }) {
   const [loading, setLoading] = useState(false);
   const [audit, setAudit] = useState(null);
   const [error, setError] = useState(null);
+  const [applyingIndex, setApplyingIndex] = useState(null);
+  const [appliedIndexes, setAppliedIndexes] = useState(new Set());
 
   async function handleRunAudit() {
     setLoading(true);
@@ -36,10 +41,69 @@ export default function AccountAuditCard() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Erro ao rodar auditoria");
       setAudit(data);
+      setAppliedIndexes(new Set()); // nova auditoria = reseta o estado de "aplicado" da anterior
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  /**
+   * Aplica a ação estruturada de um item da auditoria. Localiza o objeto
+   * completo da campanha a partir do campaign_id (a IA só devolve o ID,
+   * não os detalhes como budget_resource_name necessários para a
+   * mutação de orçamento).
+   */
+  async function handleApply(action, index) {
+    const campaign = campaigns?.find((c) => c.campaign_id === action.campaign_id);
+    if (!campaign) {
+      setError("Campanha não encontrada — sincronize de novo e rode a auditoria outra vez.");
+      return;
+    }
+
+    let payload = null;
+    if (action.type === "pause_campaign") {
+      if (!confirm(`Pausar a campanha "${campaign.name}"? Ela para de gerar cliques e gastos imediatamente.`)) return;
+      payload = { action: "pause_campaign", campaign_id: campaign.campaign_id };
+    } else if (action.type === "update_budget") {
+      if (!campaign.budget_resource_name) {
+        setError("Esta campanha não tem orçamento próprio identificado.");
+        return;
+      }
+      if (!confirm(`Alterar orçamento diário de "${campaign.name}" de R$ ${campaign.budget_amount.toFixed(2)} para R$ ${action.new_amount.toFixed(2)}?`)) return;
+      payload = {
+        action: "update_budget",
+        budget_resource_name: campaign.budget_resource_name,
+        new_amount: action.new_amount,
+      };
+    } else if (action.type === "update_bidding_strategy") {
+      const label = action.strategy === "MAXIMIZE_CONVERSIONS" ? "Maximizar Conversões" : "Maximizar Cliques";
+      if (!confirm(`Mudar a estratégia de lance de "${campaign.name}" para ${label}?`)) return;
+      payload = {
+        action: "update_bidding_strategy",
+        campaign_id: campaign.campaign_id,
+        strategy: action.strategy,
+      };
+    } else {
+      return; // tipo de ação não reconhecido — não deveria chegar aqui, já que o backend só preenche "action" para tipos válidos
+    }
+
+    setApplyingIndex(index);
+    setError(null);
+    try {
+      const res = await fetch("/api/google-ads-fetch-real", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-panel-trigger": "lcs-hub-optimizations-panel" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erro ao aplicar ação");
+      setAppliedIndexes((prev) => new Set(prev).add(index));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setApplyingIndex(null);
     }
   }
 
@@ -100,46 +164,66 @@ export default function AccountAuditCard() {
 
           {audit.priority_actions?.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {audit.priority_actions.map((a, i) => (
-                <div
-                  key={i}
-                  style={{
-                    display: "flex",
-                    gap: 12,
-                    padding: "12px 14px",
-                    borderRadius: 10,
-                    background: "var(--bg)",
-                    border: "1px solid var(--gray-light)",
-                  }}
-                >
-                  <span style={{ fontSize: 18, fontWeight: 800, color: "var(--gray-light)", minWidth: 22 }}>
-                    {i + 1}
-                  </span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
-                      <strong style={{ fontSize: 14 }}>{a.title}</strong>
-                      {a.category && (
-                        <span className="muted" style={{ fontSize: 11 }}>{CATEGORY_LABELS[a.category] || a.category}</span>
-                      )}
-                    </div>
-                    <p className="muted" style={{ margin: 0, fontSize: 13 }}>{a.detail}</p>
-                  </div>
-                  <span
+              {audit.priority_actions.map((a, i) => {
+                const isApplied = appliedIndexes.has(i);
+                return (
+                  <div
+                    key={i}
                     style={{
-                      fontSize: 10,
-                      fontWeight: 700,
-                      padding: "3px 8px",
-                      borderRadius: 8,
-                      color: "#fff",
-                      height: "fit-content",
-                      whiteSpace: "nowrap",
-                      background: IMPACT_COLOR[a.impact] || "var(--gray)",
+                      display: "flex",
+                      gap: 12,
+                      padding: "12px 14px",
+                      borderRadius: 10,
+                      background: isApplied ? "#ECFEFF" : "var(--bg)",
+                      border: `1px solid ${isApplied ? "var(--teal)" : "var(--gray-light)"}`,
                     }}
                   >
-                    {(a.impact || "").toUpperCase()}
-                  </span>
-                </div>
-              ))}
+                    <span style={{ fontSize: 18, fontWeight: 800, color: "var(--gray-light)", minWidth: 22 }}>
+                      {i + 1}
+                    </span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                        <strong style={{ fontSize: 14 }}>{a.title}</strong>
+                        {a.category && (
+                          <span className="muted" style={{ fontSize: 11 }}>{CATEGORY_LABELS[a.category] || a.category}</span>
+                        )}
+                      </div>
+                      <p className="muted" style={{ margin: 0, fontSize: 13 }}>{a.detail}</p>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          padding: "3px 8px",
+                          borderRadius: 8,
+                          color: "#fff",
+                          height: "fit-content",
+                          whiteSpace: "nowrap",
+                          background: IMPACT_COLOR[a.impact] || "var(--gray)",
+                        }}
+                      >
+                        {(a.impact || "").toUpperCase()}
+                      </span>
+                      {a.action && (
+                        isApplied ? (
+                          <span style={{ fontSize: 11, color: "var(--teal)", fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}>
+                            <Check size={12} /> Aplicado
+                          </span>
+                        ) : (
+                          <button
+                            className="btn btn-teal btn-sm"
+                            onClick={() => handleApply(a.action, i)}
+                            disabled={applyingIndex === i}
+                          >
+                            {applyingIndex === i ? "Aplicando..." : "✓ Aplicar"}
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </>
