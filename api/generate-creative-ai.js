@@ -475,20 +475,83 @@ async function checkAndPublishReel(igAccountId, containerId) {
 }
 
 /**
+ * Ângulos narrativos diferentes para o roteiro do Reel. Sorteado a cada
+ * chamada para evitar que o mesmo tema sempre gere um roteiro com a
+ * mesma estrutura (gancho genérico + 3 benefícios + CTA). Cada ângulo
+ * força a IA a abordar o tema de um jeito narrativo diferente.
+ */
+const REEL_ANGLES = [
+  {
+    name: "antes_e_depois",
+    instruction:
+      "Estruture como um \"antes e depois\": comece mostrando o problema/caos (sujeira, insegurança, desorganização) e termine mostrando a solução com a LCS.",
+  },
+  {
+    name: "mito_vs_verdade",
+    instruction:
+      "Estruture como \"mito vs verdade\": desminta uma crença comum sobre terceirização (ex: \"terceirizar é mais caro\", \"perco controle da equipe\") e mostre a realidade.",
+  },
+  {
+    name: "dica_rapida",
+    instruction:
+      "Estruture como uma dica rápida e prática (estilo \"3 sinais de que você precisa terceirizar X\"), numerada, direta, sem rodeios.",
+  },
+  {
+    name: "depoimento_fictício_generico",
+    instruction:
+      "Estruture do ponto de vista de um síndico/gestor genérico contando, em primeira pessoa, um problema que tinha antes de contratar a LCS e como resolveu (sem citar nomes reais ou depoimentos específicos inventados como se fossem de clientes reais).",
+  },
+  {
+    name: "bastidores",
+    instruction:
+      "Estruture como um \"bastidores do trabalho\": mostre a rotina e o cuidado da equipe da LCS fazendo o serviço, valorizando o profissionalismo e a atenção aos detalhes.",
+  },
+  {
+    name: "pergunta_provocativa",
+    instruction:
+      "Comece com uma pergunta provocativa que gera identificação imediata (ex: \"Seu condomínio já passou por isso?\") e desenvolva a resposta ao longo dos slides.",
+  },
+  {
+    name: "urgencia_consequencia",
+    instruction:
+      "Estruture mostrando uma consequência real de NÃO ter o serviço (ex: risco, multa, reclamação de morador) e como a LCS evita esse problema.",
+  },
+  {
+    name: "checklist",
+    instruction:
+      "Estruture como um checklist rápido (\"Você tem isso no seu condomínio/empresa? ✅\") percorrendo itens que a LCS garante.",
+  },
+];
+
+function pickRandomAngle() {
+  return REEL_ANGLES[Math.floor(Math.random() * REEL_ANGLES.length)];
+}
+
+/**
  * Gera 3-5 slides (cena + texto curto) via IA a partir do tema do Reel,
  * para alimentar tanto generateReelSlideImages quanto o texto sobreposto
  * no Shotstack. Mantém os textos curtos (máx ~60 caracteres) porque o
  * estilo "title" do Shotstack não quebra linha automaticamente bem para
  * textos longos em vídeos verticais estreitos.
+ *
+ * Sorteia um ângulo narrativo (ver REEL_ANGLES) a cada chamada e usa
+ * temperature alta para evitar que o mesmo tema sempre produza um
+ * roteiro parecido — sem isso, a IA convergia sempre para a mesma
+ * estrutura de "gancho genérico + benefícios + CTA".
  */
 async function generateReelScript(theme) {
+  const angle = pickRandomAngle();
+
   const prompt = `Você é roteirista de Reels para Instagram de uma empresa brasileira de terceirização (limpeza, portaria, facilities) em Porto Alegre, RS, chamada LCS Terceirização.
 
 Crie um roteiro de Reel curto (4 slides) sobre o tema: "${theme}".
 
+ÂNGULO NARRATIVO OBRIGATÓRIO PARA ESTE ROTEIRO: ${angle.instruction}
+Varie o vocabulário e as frases de abertura — evite começar sempre com as mesmas palavras ou estrutura de roteiros anteriores sobre o mesmo tema.
+
 Para cada slide, descreva:
-- scene_description: descrição em INGLÊS de uma cena fotográfica realista relacionada ao tema (para gerar a imagem de fundo via IA)
-- text: o texto curto que aparece sobreposto no slide, em PORTUGUÊS, máximo 60 caracteres, direto e impactante (estilo Reels — frases curtas, gancho nos primeiros slides, CTA no último)
+- scene_description: descrição em INGLÊS de uma cena fotográfica realista relacionada ao tema (para gerar a imagem de fundo via IA). Varie o enquadramento, ângulo de câmera e contexto a cada slide para não repetir a mesma composição visual.
+- text: o texto curto que aparece sobreposto no slide, em PORTUGUÊS, máximo 60 caracteres, direto e impactante, coerente com o ângulo narrativo escolhido acima.
 
 Responda APENAS um JSON neste formato, sem texto antes ou depois:
 {"slides": [{"scene_description": "...", "text": "..."}], "caption": "legenda completa para o post, em português, com 2-3 hashtags relevantes ao final"}`;
@@ -503,6 +566,10 @@ Responda APENAS um JSON neste formato, sem texto antes ou depois:
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 1200,
+      // temperature alta (padrão da API é 1, mas fica explícito aqui)
+      // para incentivar respostas mais variadas a cada chamada, mesmo
+      // com o mesmo tema e o mesmo ângulo sorteado.
+      temperature: 1,
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -513,7 +580,9 @@ Responda APENAS um JSON neste formato, sem texto antes ou depois:
   const text = data.content?.[0]?.text || "{}";
   const cleaned = text.replace(/```json|```/g, "").trim();
   try {
-    return JSON.parse(cleaned);
+    const parsed = JSON.parse(cleaned);
+    parsed.angle = angle.name; // útil para depuração/log, não usado na timeline
+    return parsed;
   } catch {
     throw new Error("A IA retornou um formato inválido no roteiro do Reel.");
   }
