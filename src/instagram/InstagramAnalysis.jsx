@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Sparkles, RefreshCw, Check, X, AlertTriangle, Image as ImageIcon, Download, Lightbulb, Copy, CheckCheck, Wand2 } from "lucide-react";
-import { generateCaption, generateCreativeAI, uploadImage } from "./api";
+import { generateCaption, generateCreativeAI, uploadImage, generateHeadline } from "./api";
 
 const SERVICE_OPTIONS = [
   "portaria de condomínio",
@@ -375,6 +375,10 @@ function DarkCardGenerator({ addPhoto }) {
   const [bankSaveError, setBankSaveError] = useState(null);
   const [savedToBank, setSavedToBank] = useState(false);
 
+  // Loading dos botões "Sugerir com IA" do título e subtítulo
+  const [suggestingHeadline, setSuggestingHeadline] = useState(false);
+  const [suggestingSubtext, setSuggestingSubtext] = useState(false);
+
   async function handleGenerate() {
     if (!headline.trim()) {
       setError("Digite o título principal do card.");
@@ -431,6 +435,34 @@ function DarkCardGenerator({ addPhoto }) {
     a.click();
   }
 
+  async function handleSuggestHeadline() {
+    setSuggestingHeadline(true);
+    setError(null);
+    try {
+      const result = await generateHeadline(service, "headline");
+      if (!result.ok) throw new Error(result.error);
+      setHeadline(result.headline);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSuggestingHeadline(false);
+    }
+  }
+
+  async function handleSuggestSubtext() {
+    setSuggestingSubtext(true);
+    setError(null);
+    try {
+      const result = await generateHeadline(service, "subtext");
+      if (!result.ok) throw new Error(result.error);
+      setSubtext(result.headline);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSuggestingSubtext(false);
+    }
+  }
+
   return (
     <div className="card">
       <div className="card-title">
@@ -463,7 +495,22 @@ function DarkCardGenerator({ addPhoto }) {
           </select>
         </div>
         <div>
-          <label className="muted" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Título principal (card destacado)</label>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <label className="muted" style={{ fontSize: 12 }}>Título principal (card destacado)</label>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={handleSuggestHeadline}
+              disabled={suggestingHeadline}
+              style={{ fontSize: 11, padding: "3px 8px" }}
+            >
+              {suggestingHeadline ? (
+                <RefreshCw size={11} className="spin" style={{ marginRight: 4 }} />
+              ) : (
+                <Sparkles size={11} style={{ marginRight: 4 }} />
+              )}
+              Sugerir com IA
+            </button>
+          </div>
           <input
             type="text"
             value={headline}
@@ -473,7 +520,22 @@ function DarkCardGenerator({ addPhoto }) {
           />
         </div>
         <div>
-          <label className="muted" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Subtítulo (opcional)</label>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <label className="muted" style={{ fontSize: 12 }}>Subtítulo (opcional)</label>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={handleSuggestSubtext}
+              disabled={suggestingSubtext}
+              style={{ fontSize: 11, padding: "3px 8px" }}
+            >
+              {suggestingSubtext ? (
+                <RefreshCw size={11} className="spin" style={{ marginRight: 4 }} />
+              ) : (
+                <Sparkles size={11} style={{ marginRight: 4 }} />
+              )}
+              Sugerir com IA
+            </button>
+          </div>
           <input
             type="text"
             value={subtext}
