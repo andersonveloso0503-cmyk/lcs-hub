@@ -1,5 +1,5 @@
 // /api/buffer-manage.js
-// Gerencia posts já existentes no Buffer: excluir ou editar (trocar imagem/texto).
+// Gerencia posts já existentes no Buffer: excluir ou editar (trocar imagem/texto/data).
 // Usa as mutations deletePost e editPost da API GraphQL do Buffer, confirmadas
 // na documentação oficial (developers.buffer.com/reference.html).
 
@@ -95,19 +95,32 @@ async function editBufferPostImage(postId, imageUrl, isInstagram) {
 }
 
 /**
- * Reagenda um post já existente no Buffer, alterando só o campo dueAt via
- * a mesma mutation editPost (EditPostInput.dueAt, confirmado no changelog
- * oficial da API GraphQL do Buffer). mode: customScheduled é obrigatório
- * junto com dueAt — sem ele, o Buffer rejeita a mudança de data.
+ * Reagenda um post já existente no Buffer, alterando o campo dueAt via a
+ * mesma mutation editPost (EditPostInput.dueAt).
+ *
+ * IMPORTANTE: o Buffer trata editPost como uma substituição completa do
+ * conteúdo do post, não como um "patch" parcial — se enviarmos só dueAt,
+ * ele entende que o post passou a não ter texto/imagem/tipo e rejeita com
+ * "Post must have either text or media" / "Instagram posts require..."
+ * Por isso é obrigatório reenviar text, assets (imagem) e metadata.instagram
+ * junto com a nova data, mesmo que esses campos não estejam mudando.
  */
-async function editBufferPostDate(postId, dueAt) {
+async function editBufferPostDate(postId, dueAt, text, imageUrl, isInstagram) {
+  const textBlock = text ? `,\n        text: "${escapeGraphQLString(text)}"` : "";
+  const assetsBlock = imageUrl
+    ? `,\n        assets: [{ image: { url: "${escapeGraphQLString(imageUrl)}" } }]`
+    : "";
+  const metadataBlock = isInstagram
+    ? `,\n        metadata: { instagram: { type: post, shouldShareToFeed: true } }`
+    : "";
+
   const query = `
     mutation EditPostDate {
       editPost(input: {
         id: "${postId}",
         schedulingType: automatic,
         mode: customScheduled,
-        dueAt: "${dueAt}"
+        dueAt: "${dueAt}"${textBlock}${assetsBlock}${metadataBlock}
       }) {
         ... on PostActionSuccess {
           post {
@@ -143,7 +156,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { action, bufferPostIds, imageUrl, isInstagram, dueAt } = req.body || {};
+    const { action, bufferPostIds, imageUrl, isInstagram, dueAt, text } = req.body || {};
 
     if (!action || !Array.isArray(bufferPostIds) || bufferPostIds.length === 0) {
       return res.status(400).json({
@@ -172,7 +185,11 @@ export default async function handler(req, res) {
       if (!dueAt) {
         return res.status(400).json({ error: "Campo 'dueAt' (ISO 8601) é obrigatório para editDate" });
       }
-      const results = await Promise.all(bufferPostIds.map((id) => editBufferPostDate(id, dueAt)));
+      const results = await Promise.all(
+        bufferPostIds.map((id) =>
+          editBufferPostDate(id, dueAt, text, imageUrl, Boolean(isInstagram))
+        )
+      );
       const allOk = results.every((r) => r.ok);
       return res.status(allOk ? 200 : 502).json({ ok: allOk, results });
     }
