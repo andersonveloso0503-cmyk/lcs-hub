@@ -293,7 +293,7 @@ Style: clean, editorial, professional, high contrast, suitable for a B2B service
       n: 1,
       size: "1024x1024",
       quality: "medium",
-      output_format: "b64_json",
+      output_format: "png",
     }),
   });
 
