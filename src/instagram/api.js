@@ -83,21 +83,33 @@ export async function generateWeek() {
   }
 }
 
-export async function scheduleToBuffer({ text, imageUrl, scheduledAt, channels }) {
+export async function scheduleToBuffer({ text, imageUrl, imageUrls, scheduledAt, channels }) {
   try {
+    // Aceita tanto imageUrl (uma imagem) quanto imageUrls (array) — o
+    // backend (api/buffer-schedule.js) já suporta os dois formatos, mas
+    // esta função só estava repassando "imageUrl", então chamadas com
+    // imageUrls (como o WeeklyPlanner faz) nunca enviavam imagem alguma,
+    // causando erro 400 "campos obrigatórios" silenciosamente.
+    const finalImageUrls = imageUrls && imageUrls.length > 0 ? imageUrls : imageUrl ? [imageUrl] : [];
+
     const res = await fetch("/api/buffer-schedule", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, imageUrl, scheduledAt, channels }),
+      body: JSON.stringify({ text, imageUrls: finalImageUrls, scheduledAt, channels }),
     });
     const data = await res.json();
 
-    if (res.status === 502) {
+    // Qualquer status de erro (400 de validação, 502 de falha nos canais,
+    // 500 de erro interno) precisa de uma mensagem segura — antes disso só
+    // o 502 tinha tratamento, então 400/500 caíam no "return data.ok" mais
+    // abaixo sem nenhum campo "error" definido, gerando o "undefined" que
+    // aparecia na tela.
+    if (!res.ok) {
       const errorMsg = data.results
         ? data.results
             .map((r) => `${r.channel}: ${r.error}${r.raw ? ` [detalhe: ${JSON.stringify(r.raw)}]` : ""}`)
             .join(" | ")
-        : data.error || "Erro ao agendar no Buffer";
+        : data.error || `Erro ao agendar no Buffer (HTTP ${res.status})`;
       return { ok: false, error: errorMsg };
     }
 
