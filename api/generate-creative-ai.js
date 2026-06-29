@@ -323,7 +323,7 @@ function buildShotstackTimeline(slideImageUrls, slideTexts, slideDuration = 4) {
       type: "text",
       text,
       width: 900, // 1080 (largura do vídeo) menos ~90px de margem de cada lado
-      height: 280, // reduzido para a caixa inteira caber dentro da área visível ao subir
+      height: 320, // o suficiente pra 2-3 linhas com folga, sem precisar subir muito
       font: {
         family: "Open Sans",
         size: 56,
@@ -344,7 +344,7 @@ function buildShotstackTimeline(slideImageUrls, slideTexts, slideDuration = 4) {
     start: i * slideDuration + 0.3, // pequeno delay para o texto aparecer depois da imagem
     length: slideDuration - 0.3,
     position: "bottom",
-    offset: { y: -0.18 }, // sobe mais a caixa de texto -- com height menor, ela inteira fica visível, sem cortar embaixo
+    offset: { y: -0.05 }, // pequeno respiro da borda inferior, igual ao exemplo oficial do Shotstack
     transition: { in: "fade", out: "fade" },
   }));
 
