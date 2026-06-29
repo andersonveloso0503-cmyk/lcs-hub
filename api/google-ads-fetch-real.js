@@ -1164,7 +1164,7 @@ async function generateAccountAudit(campaigns, qualityScores) {
     .filter((c) => c.status === "ENABLED")
     .map((c) => {
       const m = c.metrics || {};
-      return `- "${c.name}" (${c.campaign_type}): ${m.clicks ?? 0} cliques, CTR ${((m.ctr ?? 0) * 100).toFixed(2)}%, ${m.conversions ?? 0} conversões, LCS Score ${c.lcs_score ?? "—"}/10`;
+      return `- campaign_id="${c.campaign_id}" nome="${c.name}" (${c.campaign_type}, estratégia atual: ${c.bidding_strategy}): ${m.clicks ?? 0} cliques, CTR ${((m.ctr ?? 0) * 100).toFixed(2)}%, ${m.conversions ?? 0} conversões, orçamento atual R$${(c.budget_amount ?? 0).toFixed(2)}/dia, LCS Score ${c.lcs_score ?? "—"}/10`;
     })
     .join("\n");
 
@@ -1202,11 +1202,18 @@ Faça uma auditoria ESTRATÉGICA E ABRANGENTE (não pontual) identificando:
 2. Quais ações teriam MAIOR impacto na posição geral dos anúncios
 3. Priorização clara (o que resolver primeiro)
 
+Para cada ação prioritária, quando ela corresponder EXATAMENTE a uma das ações automatizáveis abaixo, preencha o campo "action" com os parâmetros certos, usando o campaign_id exato fornecido acima. Se a ação for qualitativa (ex.: "melhore a página de destino", "revise o texto do anúncio") e não corresponder a nenhuma das ações abaixo, deixe "action" como null — não invente uma ação que não existe.
+
+AÇÕES AUTOMATIZÁVEIS DISPONÍVEIS:
+- pause_campaign: { type: "pause_campaign", campaign_id }
+- update_budget: { type: "update_budget", campaign_id, new_amount (número em R$, > 0) }
+- update_bidding_strategy: { type: "update_bidding_strategy", campaign_id, strategy: "MAXIMIZE_CONVERSIONS" | "TARGET_SPEND" }
+
 Responda em JSON neste formato exato, sem texto antes ou depois:
 {
   "overall_assessment": "resumo de 2-3 frases sobre o estado geral da conta e o que mais limita a posição dos anúncios hoje",
   "priority_actions": [
-    {"title": "título curto (máx 10 palavras)", "detail": "explicação específica com números reais (máx 250 caracteres)", "impact": "alto" | "medio" | "baixo", "category": "criativo" | "pagina_destino" | "palavras_chave" | "estrutura"}
+    {"title": "título curto (máx 10 palavras)", "detail": "explicação específica com números reais (máx 250 caracteres)", "impact": "alto" | "medio" | "baixo", "category": "criativo" | "pagina_destino" | "palavras_chave" | "estrutura", "action": null | {"type": "...", "campaign_id": "...", ...demais campos}}
   ]
 }
 
@@ -1236,6 +1243,19 @@ Gere entre 4 e 8 ações prioritárias, ordenadas por impacto (maior impacto pri
     audit = JSON.parse(cleaned);
   } catch {
     throw new Error("A IA retornou um formato inválido na auditoria geral.");
+  }
+
+  // Validação extra: confere se o campaign_id de cada ação de fato existe
+  // no conjunto de campanhas analisado — evita um botão "Aplicar" que
+  // falharia por referenciar um ID inventado ou de outra conta.
+  const validCampaignIds = new Set(campaigns.map((c) => c.campaign_id));
+  if (Array.isArray(audit.priority_actions)) {
+    audit.priority_actions = audit.priority_actions.map((a) => {
+      if (a.action && !validCampaignIds.has(a.action.campaign_id)) {
+        return { ...a, action: null };
+      }
+      return a;
+    });
   }
 
   return { ...audit, avg_quality_score: avgQs, keywords_analyzed: qsWithScore.length };
