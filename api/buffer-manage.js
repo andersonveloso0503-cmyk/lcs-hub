@@ -94,13 +94,55 @@ async function editBufferPostImage(postId, imageUrl, isInstagram) {
   return { ok: true, post: payload.post };
 }
 
+/**
+ * Reagenda um post já existente no Buffer, alterando só o campo dueAt via
+ * a mesma mutation editPost (EditPostInput.dueAt, confirmado no changelog
+ * oficial da API GraphQL do Buffer). mode: customScheduled é obrigatório
+ * junto com dueAt — sem ele, o Buffer rejeita a mudança de data.
+ */
+async function editBufferPostDate(postId, dueAt) {
+  const query = `
+    mutation EditPostDate {
+      editPost(input: {
+        id: "${postId}",
+        mode: customScheduled,
+        dueAt: "${dueAt}"
+      }) {
+        ... on PostActionSuccess {
+          post {
+            id
+            text
+            dueAt
+          }
+        }
+        ... on MutationError {
+          message
+        }
+      }
+    }
+  `;
+  const result = await bufferRequest(query);
+
+  if (result?.errors) {
+    return { ok: false, error: result.errors.map((e) => e.message).join("; "), raw: result };
+  }
+  const payload = result?.data?.editPost;
+  if (payload?.message && !payload?.post) {
+    return { ok: false, error: payload.message, raw: result };
+  }
+  if (!payload?.post) {
+    return { ok: false, error: "Resposta inesperada do Buffer", raw: result };
+  }
+  return { ok: true, post: payload.post };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    const { action, bufferPostIds, imageUrl, isInstagram } = req.body || {};
+    const { action, bufferPostIds, imageUrl, isInstagram, dueAt } = req.body || {};
 
     if (!action || !Array.isArray(bufferPostIds) || bufferPostIds.length === 0) {
       return res.status(400).json({
@@ -125,7 +167,16 @@ export default async function handler(req, res) {
       return res.status(allOk ? 200 : 502).json({ ok: allOk, results });
     }
 
-    return res.status(400).json({ error: "Ação inválida. Use 'delete' ou 'editImage'." });
+    if (action === "editDate") {
+      if (!dueAt) {
+        return res.status(400).json({ error: "Campo 'dueAt' (ISO 8601) é obrigatório para editDate" });
+      }
+      const results = await Promise.all(bufferPostIds.map((id) => editBufferPostDate(id, dueAt)));
+      const allOk = results.every((r) => r.ok);
+      return res.status(allOk ? 200 : 502).json({ ok: allOk, results });
+    }
+
+    return res.status(400).json({ error: "Ação inválida. Use 'delete', 'editImage' ou 'editDate'." });
   } catch (err) {
     console.error("Erro ao gerenciar post no Buffer:", err);
     return res.status(500).json({ error: err.message });
