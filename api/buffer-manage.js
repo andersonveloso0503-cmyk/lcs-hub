@@ -105,6 +105,7 @@ async function editBufferPostDate(postId, dueAt) {
     mutation EditPostDate {
       editPost(input: {
         id: "${postId}",
+        schedulingType: automatic,
         mode: customScheduled,
         dueAt: "${dueAt}"
       }) {
