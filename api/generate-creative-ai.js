@@ -109,7 +109,11 @@ async function getInstagramAccountId() {
 }
 
 async function fetchInstagramProfile(igAccountId) {
-  const fields = "username,name,biography,website,followers_count,follows_count,media_count,profile_picture_url,category_name";
+  // Removido "category_name" — campo descontinuado nesta versão da Graph
+  // API para este tipo de conta (causava erro #100 "Tried accessing
+  // nonexisting field (category_name)"). A categoria não é essencial para
+  // a análise, então foi simplesmente retirada da lista de campos.
+  const fields = "username,name,biography,website,followers_count,follows_count,media_count,profile_picture_url";
   const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}?fields=${fields}&access_token=${process.env.FACEBOOK_PAGE_ACCESS_TOKEN}`;
   const res = await fetch(url);
   const data = await res.json();
@@ -160,7 +164,6 @@ Analise o perfil do Instagram da LCS Terceirização (limpeza, portaria e facili
 PERFIL:
 - Username: @${profile.username || "desconhecido"}
 - Nome: ${profile.name || "(não definido)"}
-- Categoria: ${profile.category_name || "(NÃO DEFINIDA)"}
 - Biografia: "${profile.biography || "(vazia)"}"
 - Website na bio: ${profile.website || "(não configurado)"}
 - Seguidores: ${profile.followers_count ?? "?"}
