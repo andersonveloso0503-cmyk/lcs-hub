@@ -20,7 +20,12 @@ const THEME_OPTIONS = [
 export default function ReelCreator({ campaigns }) {
   const [open, setOpen] = useState(false);
   const [theme, setTheme] = useState(THEME_OPTIONS[0]);
-  const [phase, setPhase] = useState("idle"); // idle | script | images | rendering | publishing | done | error
+  // idle | script | images | rendering | preview | publishing | done | error
+  // "preview" é o novo estado: vídeo já renderizado, aguardando aprovação
+  // manual antes de enviar para o Instagram — sem isso, o Reel ia direto
+  // ao ar mesmo com problemas visuais (como o texto ilegível identificado
+  // antes), sem chance de revisão.
+  const [phase, setPhase] = useState("idle");
   const [progressText, setProgressText] = useState("");
   const [script, setScript] = useState(null);
   const [slideImageUrls, setSlideImageUrls] = useState([]);
@@ -44,6 +49,11 @@ export default function ReelCreator({ campaigns }) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  /**
+   * Etapas 1-3: roteiro, imagens, e renderização do vídeo. Termina em
+   * "preview", SEM publicar nada ainda — o usuário revisa o resultado e
+   * decide manualmente se aprova (handlePublish) ou descarta (handleReset).
+   */
   async function handleStart() {
     cancelledRef.current = false;
     setError(null);
@@ -100,17 +110,30 @@ export default function ReelCreator({ campaigns }) {
       }
       if (!videoReady) throw new Error("Tempo limite excedido renderizando o vídeo. Tente novamente.");
       setVideoUrl(videoReady);
+      setPhase("preview"); // para aqui — espera aprovação manual antes de publicar
+    } catch (err) {
+      setError(err.message);
+      setPhase("error");
+    }
+  }
 
-      // Etapa 4 — cria o container no Instagram
+  /**
+   * Etapas 4-5: só rodam quando o usuário aprova explicitamente o vídeo
+   * já renderizado na prévia. videoUrl e script já estão no state desde
+   * handleStart — não precisa gerar nada de novo aqui.
+   */
+  async function handlePublish() {
+    cancelledRef.current = false;
+    setError(null);
+    try {
       setPhase("publishing");
       setProgressText("Enviando para o Instagram...");
       const containerResult = await callApi({
         action: "create_reel_container",
-        video_url: videoReady,
-        caption: scriptResult.caption,
+        video_url: videoUrl,
+        caption: script.caption,
       });
 
-      // Etapa 5 — polling até o Instagram processar e publicar
       let published = false;
       for (let attempt = 0; attempt < 60; attempt++) {
         if (cancelledRef.current) return;
@@ -208,11 +231,11 @@ export default function ReelCreator({ campaigns }) {
             </select>
           </div>
           <p className="muted" style={{ fontSize: 12, marginBottom: 14 }}>
-            ⚠️ O processo leva 2-5 minutos (geração de imagens + renderização de vídeo + processamento
-            no Instagram). Não saia desta tela enquanto estiver rodando.
+            ⚠️ A geração leva 1-3 minutos (imagens + renderização do vídeo). Depois disso, você
+            revisa o resultado antes de decidir se publica.
           </p>
           <button className="btn btn-teal" onClick={handleStart}>
-            <Sparkles size={14} style={{ marginRight: 6 }} /> Gerar e Publicar Reel
+            <Sparkles size={14} style={{ marginRight: 6 }} /> Gerar Reel para Revisão
           </button>
         </>
       )}
@@ -235,6 +258,38 @@ export default function ReelCreator({ campaigns }) {
           <button className="btn btn-outline btn-sm" onClick={handleCancel}>
             Cancelar
           </button>
+        </div>
+      )}
+
+      {phase === "preview" && (
+        <div style={{ marginTop: 14 }}>
+          <div className="pending-metrics-note" style={{ borderColor: "var(--blue)", background: "#EEF2FF", marginBottom: 14 }}>
+            <span>👀 Revise o vídeo abaixo antes de publicar. Texto ilegível, imagem estranha ou erro no roteiro? Descarte e gere outro.</span>
+          </div>
+          {videoUrl && (
+            <video
+              src={videoUrl}
+              controls
+              autoPlay
+              loop
+              muted
+              style={{ width: "100%", maxWidth: 280, borderRadius: 12, display: "block", margin: "0 auto 14px", background: "#000" }}
+            />
+          )}
+          {script?.caption && (
+            <div style={{ padding: 10, borderRadius: 8, background: "var(--bg)", marginBottom: 14, fontSize: 13 }}>
+              <strong style={{ fontSize: 12, color: "var(--gray)" }}>LEGENDA:</strong>
+              <p style={{ margin: "4px 0 0" }}>{script.caption}</p>
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="btn btn-teal" onClick={handlePublish}>
+              <Check size={14} style={{ marginRight: 6 }} /> Aprovar e Publicar
+            </button>
+            <button className="btn btn-outline btn-sm" onClick={handleReset}>
+              Descartar e gerar outro
+            </button>
+          </div>
         </div>
       )}
 
