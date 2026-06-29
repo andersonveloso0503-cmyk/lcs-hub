@@ -17,14 +17,16 @@ export async function generateCaption({ service, tone, goal, format, context, in
 
 /**
  * Gera um título de destaque curto e criativo com IA, baseado só no serviço
- * (sem precisar analisar a foto). Usado no Editor de Fotos como sugestão.
+ * (sem precisar analisar a foto). Usado no Editor de Fotos como sugestão,
+ * e também no Criativo Estilo Card Escuro (título e subtítulo).
+ * type: "headline" (padrão) ou "subtext".
  */
-export async function generateHeadline(service) {
+export async function generateHeadline(service, type = "headline") {
   try {
     const res = await fetch("/api/generate-headline", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ service }),
+      body: JSON.stringify({ service, type }),
     });
     const data = await res.json();
     if (!res.ok) return { ok: false, error: data.error || "Erro ao gerar título" };
