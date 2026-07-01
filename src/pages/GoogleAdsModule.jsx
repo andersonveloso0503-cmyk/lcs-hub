@@ -6,6 +6,8 @@ import { db } from "../firebase/config";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
 import ABTestCard from "../googleads/ABTestCard";
 import AccountAuditCard from "../googleads/AccountAuditCard";
+import GioBrainDashboard from "../googleads/GioBrainDashboard";
+import StopLossCard from "../googleads/StopLossCard";
 
 const BIDDING_LABELS = {
   MAXIMIZE_CONVERSIONS: "Max. conversões",
@@ -39,6 +41,9 @@ export default function GoogleAdsModule() {
     recommendations,
     recommendationsCheckedAt,
     biddingSuggestions,
+    dailyPerformance,
+    previousPeriodMetrics,
+    winningHeadlines,
     loading,
     error,
   } = useGoogleAdsSnapshot();
@@ -208,6 +213,17 @@ export default function GoogleAdsModule() {
       </div>
 
       <AccountAuditCard campaigns={campaigns} />
+      <StopLossCard campaigns={campaigns} />
+
+      {!loading && campaigns.length > 0 && (
+        <GioBrainDashboard
+          campaigns={campaigns}
+          dailyPerformance={dailyPerformance}
+          previousPeriodMetrics={previousPeriodMetrics}
+          winningHeadlines={winningHeadlines}
+          monthToDateSpend={monthToDateSpend}
+        />
+      )}
 
       {error && (
         <div className="card error-card">
