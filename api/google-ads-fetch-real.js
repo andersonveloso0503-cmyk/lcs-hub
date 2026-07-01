@@ -2418,21 +2418,27 @@ export default async function handler(req, res) {
         }
         await addNegativeKeyword(accessToken, campaign_id, term);
 
-        // Remove a sugestão do snapshot persistido — sem isso, ela
-        // continuaria aparecendo na tela após recarregar a página, já que
-        // o front lê direto do Firestore (não há outro lugar marcando
-        // "já aplicada" de forma durável).
         try {
           const db = getAdminDb();
           const docRef = db.collection("google_ads_snapshot").doc("current");
           const snap = await docRef.get();
           if (snap.exists) {
+            // Remove da lista de sugestões visíveis
             const current = snap.data().negative_keyword_suggestions || [];
             const updated = current.filter((s) => !(s.campaign_id === campaign_id && s.term === term));
-            await docRef.update({ negative_keyword_suggestions: updated });
+            // Salva na lista permanente de termos já aplicados — usada na
+            // sincronização pra filtrar esses termos mesmo que o Google ainda
+            // os mostre no histórico de 30 dias do search_term_view.
+            const appliedList = snap.data().negative_keywords_applied || [];
+            const key = `${campaign_id}::${term}`;
+            if (!appliedList.includes(key)) appliedList.push(key);
+            await docRef.update({
+              negative_keyword_suggestions: updated,
+              negative_keywords_applied: appliedList,
+            });
           }
         } catch (err) {
-          console.error("Erro ao remover sugestão aplicada do snapshot (não bloqueia a resposta):", err.message);
+          console.error("Erro ao atualizar snapshot após negativar (não bloqueia a resposta):", err.message);
         }
 
         return res.status(200).json({ ok: true, message: `Palavra negativa "${term}" adicionada.` });
@@ -2498,26 +2504,28 @@ export default async function handler(req, res) {
     // falha nela não deve impedir o snapshot principal de ser salvo.
     let negativeKeywordSuggestions = previousData?.negative_keyword_suggestions || [];
     let negativeKeywordsCheckedAt = previousData?.negative_keywords_checked_at || null;
+    // Lista permanente de termos já aplicados como negativa — nunca voltam
+    // mesmo que o Google ainda os mostre no histórico de 30 dias.
+    const appliedNegativeKeys = new Set(previousData?.negative_keywords_applied || []);
+
     if (process.env.ANTHROPIC_API_KEY) {
       try {
         const searchTerms = await fetchSearchTerms(accessToken);
         const analysis = await analyzeNegativeKeywords(searchTerms);
 
-        // CORREÇÃO CRÍTICA: não substitui o array inteiro — filtra do novo
-        // resultado os termos que o usuário já aplicou ou descartou (que
-        // foram removidos do snapshot via dismiss_negative_keyword /
-        // add_negative_keyword). Sem isso, cada sincronização recriava
-        // exatamente as mesmas sugestões, ignorando o que o usuário decidiu.
+        // Filtra termos já aplicados (lista permanente) antes de qualquer merge
+        const freshSuggestions = analysis.suggestions.filter(
+          (s) => !appliedNegativeKeys.has(`${s.campaign_id}::${s.term}`)
+        );
+
         const remainingTermKeys = new Set(
           negativeKeywordSuggestions.map((s) => `${s.campaign_id}::${s.term}`)
         );
-        // Sugestões novas que o usuário ainda não viu (não estão no snapshot atual)
-        const brandNew = analysis.suggestions.filter(
+        const brandNew = freshSuggestions.filter(
           (s) => !remainingTermKeys.has(`${s.campaign_id}::${s.term}`)
         );
-        // Sugestões já no snapshot que continuam válidas (o termo ainda gastou sem converter)
         const analysisTermKeys = new Set(
-          analysis.suggestions.map((s) => `${s.campaign_id}::${s.term}`)
+          freshSuggestions.map((s) => `${s.campaign_id}::${s.term}`)
         );
         const stillValid = negativeKeywordSuggestions.filter((s) =>
           analysisTermKeys.has(`${s.campaign_id}::${s.term}`)
@@ -2525,7 +2533,7 @@ export default async function handler(req, res) {
         negativeKeywordSuggestions = [...stillValid, ...brandNew];
         negativeKeywordsCheckedAt = new Date().toISOString();
         console.log(
-          `[google-ads] ${analysis.analyzedCount} termos analisados, ${brandNew.length} novos + ${stillValid.length} ainda válidos = ${negativeKeywordSuggestions.length} sugestões`
+          `[google-ads] ${analysis.analyzedCount} termos analisados, ${appliedNegativeKeys.size} já aplicados ignorados, ${brandNew.length} novos + ${stillValid.length} ainda válidos = ${negativeKeywordSuggestions.length} sugestões`
         );
       } catch (err) {
         console.error("Erro na análise de palavras-chave negativas (não bloqueia o snapshot):", err.message);
