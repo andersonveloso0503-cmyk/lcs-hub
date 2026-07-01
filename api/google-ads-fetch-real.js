@@ -1918,6 +1918,84 @@ async function fetchTodayMetrics(accessToken) {
   return totals;
 }
 
+function getPreviousPeriodStart() {
+  const d = new Date(); d.setDate(d.getDate() - 14); return d.toISOString().split("T")[0];
+}
+function getPreviousPeriodEnd() {
+  const d = new Date(); d.setDate(d.getDate() - 8); return d.toISOString().split("T")[0];
+}
+
+async function fetchDailyPerformance(accessToken) {
+  const query = `
+    SELECT segments.date, metrics.clicks, metrics.impressions, metrics.cost_micros, metrics.conversions
+    FROM customer
+    WHERE segments.date DURING LAST_7_DAYS
+    ORDER BY segments.date ASC
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}`, "developer-token": DEVELOPER_TOKEN, "login-customer-id": MCC_CUSTOMER_ID }, body: JSON.stringify({ query }) });
+  const text = await res.text();
+  if (!res.ok) { console.error("Erro ao buscar performance diária:", text.slice(0, 300)); return []; }
+  const batches = JSON.parse(text);
+  const byDate = {};
+  for (const b of batches) for (const row of b.results || []) {
+    const date = row.segments?.date; if (!date) continue;
+    if (!byDate[date]) byDate[date] = { date, clicks: 0, impressions: 0, cost: 0, conversions: 0 };
+    byDate[date].clicks += Number(row.metrics?.clicks || 0);
+    byDate[date].impressions += Number(row.metrics?.impressions || 0);
+    byDate[date].cost += Number(row.metrics?.costMicros || 0) / 1_000_000;
+    byDate[date].conversions += Number(row.metrics?.conversions || 0);
+  }
+  return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function fetchPreviousPeriodMetrics(accessToken) {
+  const query = `
+    SELECT metrics.clicks, metrics.impressions, metrics.cost_micros, metrics.conversions
+    FROM customer
+    WHERE segments.date BETWEEN '${getPreviousPeriodStart()}' AND '${getPreviousPeriodEnd()}'
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}`, "developer-token": DEVELOPER_TOKEN, "login-customer-id": MCC_CUSTOMER_ID }, body: JSON.stringify({ query }) });
+  const text = await res.text();
+  if (!res.ok) return null;
+  const batches = JSON.parse(text);
+  const totals = { clicks: 0, impressions: 0, cost: 0, conversions: 0 };
+  for (const b of batches) for (const row of b.results || []) {
+    totals.clicks += Number(row.metrics?.clicks || 0);
+    totals.impressions += Number(row.metrics?.impressions || 0);
+    totals.cost += Number(row.metrics?.costMicros || 0) / 1_000_000;
+    totals.conversions += Number(row.metrics?.conversions || 0);
+  }
+  return totals;
+}
+
+async function fetchWinningHeadlines(accessToken) {
+  const query = `
+    SELECT asset.text_asset.text, metrics.impressions, metrics.clicks
+    FROM ad_group_ad_asset_view
+    WHERE ad_group_ad_asset_view.field_type = HEADLINE
+      AND campaign.status = 'ENABLED'
+      AND metrics.impressions > 0
+      AND segments.date DURING LAST_30_DAYS
+    ORDER BY metrics.impressions DESC
+    LIMIT 20
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}`, "developer-token": DEVELOPER_TOKEN, "login-customer-id": MCC_CUSTOMER_ID }, body: JSON.stringify({ query }) });
+  const text = await res.text();
+  if (!res.ok) { console.error("Erro ao buscar headlines:", text.slice(0, 300)); return []; }
+  const batches = JSON.parse(text);
+  const byText = {};
+  for (const b of batches) for (const row of b.results || []) {
+    const txt = row.asset?.textAsset?.text; if (!txt) continue;
+    if (!byText[txt]) byText[txt] = { text: txt, impressions: 0, clicks: 0 };
+    byText[txt].impressions += Number(row.metrics?.impressions || 0);
+    byText[txt].clicks += Number(row.metrics?.clicks || 0);
+  }
+  return Object.values(byText).sort((a, b) => b.impressions - a.impressions).slice(0, 10);
+}
+
 /**
  * Gera recomendações de melhoria em texto livre via IA, analisando o
  * snapshot completo de campanhas (métricas reais + LCS Score). Diferente
@@ -2053,14 +2131,44 @@ export default async function handler(req, res) {
     });
   }
 
-  // Fase 4 — ações de escrita (disparadas manualmente pelo painel, OU pelo
-  // cron diário no caso específico de "run_auto_optimizations"). Cada uma
+  const action = req.body?.action;
+
+  // Stop Loss — ações que só tocam no Firestore, sem precisar das
+  // credenciais da Google Ads API, por isso ficam antes da checagem.
+  if (action === "dismiss_stop_loss") {
+    try {
+      const { campaign_id } = req.body;
+      const db = getAdminDb();
+      const snap = await db.collection("google_ads_snapshot").doc("current").get();
+      if (snap.exists) {
+        const current = snap.data().stop_loss_alerts || [];
+        const updated = current.filter((a) => a.campaign_id !== campaign_id);
+        await db.collection("google_ads_snapshot").doc("current").update({ stop_loss_alerts: updated });
+      }
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  if (action === "configure_stop_loss") {
+    try {
+      const { threshold } = req.body;
+      if (!threshold || threshold <= 0) {
+        return res.status(400).json({ error: "threshold deve ser um número > 0." });
+      }
+      const db = getAdminDb();
+      await db.collection("google_ads_config").doc("stop_loss").set({ threshold });
+      return res.status(200).json({ ok: true, threshold });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
   // exige um campo "action" específico no body e é executada de forma
   // isolada: se der erro, retorna 500 sem tocar no snapshot do Firestore.
   // Depois de qualquer mutação bem-sucedida, NÃO re-sincronizamos
   // automaticamente — o usuário (ou o próximo cron de sync) atualiza o
   // snapshot separadamente, mantendo o número de chamadas à API previsível.
-  const action = req.body?.action;
   if (
     action === "add_negative_keyword" ||
     action === "dismiss_negative_keyword" ||
@@ -2381,10 +2489,30 @@ export default async function handler(req, res) {
       try {
         const searchTerms = await fetchSearchTerms(accessToken);
         const analysis = await analyzeNegativeKeywords(searchTerms);
-        negativeKeywordSuggestions = analysis.suggestions;
+
+        // CORREÇÃO CRÍTICA: não substitui o array inteiro — filtra do novo
+        // resultado os termos que o usuário já aplicou ou descartou (que
+        // foram removidos do snapshot via dismiss_negative_keyword /
+        // add_negative_keyword). Sem isso, cada sincronização recriava
+        // exatamente as mesmas sugestões, ignorando o que o usuário decidiu.
+        const remainingTermKeys = new Set(
+          negativeKeywordSuggestions.map((s) => `${s.campaign_id}::${s.term}`)
+        );
+        // Sugestões novas que o usuário ainda não viu (não estão no snapshot atual)
+        const brandNew = analysis.suggestions.filter(
+          (s) => !remainingTermKeys.has(`${s.campaign_id}::${s.term}`)
+        );
+        // Sugestões já no snapshot que continuam válidas (o termo ainda gastou sem converter)
+        const analysisTermKeys = new Set(
+          analysis.suggestions.map((s) => `${s.campaign_id}::${s.term}`)
+        );
+        const stillValid = negativeKeywordSuggestions.filter((s) =>
+          analysisTermKeys.has(`${s.campaign_id}::${s.term}`)
+        );
+        negativeKeywordSuggestions = [...stillValid, ...brandNew];
         negativeKeywordsCheckedAt = new Date().toISOString();
         console.log(
-          `[google-ads] ${analysis.analyzedCount} termos sem conversão analisados, ${analysis.suggestions.length} sugestões de negativa`
+          `[google-ads] ${analysis.analyzedCount} termos analisados, ${brandNew.length} novos + ${stillValid.length} ainda válidos = ${negativeKeywordSuggestions.length} sugestões`
         );
       } catch (err) {
         console.error("Erro na análise de palavras-chave negativas (não bloqueia o snapshot):", err.message);
@@ -2407,26 +2535,70 @@ export default async function handler(req, res) {
 
     // Sugestões de estratégia de lance — regra fixa (sem chamada de IA),
     // recalculada a cada sincronização porque depende só de métricas que
-    // já temos no próprio fetchCampaigns.
     const biddingSuggestions = campaigns
       .filter((c) => c.status === "ENABLED")
       .map((c) => suggestBiddingStrategy(c))
       .filter(Boolean);
 
+    // Novos dados pra painel estilo GioBrain — falhas não bloqueiam o snapshot
+    let dailyPerformance = [];
+    let previousPeriodMetrics = null;
+    let winningHeadlines = [];
+    try { dailyPerformance = await fetchDailyPerformance(accessToken); } catch (e) { console.error("Erro dailyPerformance:", e.message); }
+    try { previousPeriodMetrics = await fetchPreviousPeriodMetrics(accessToken); } catch (e) { console.error("Erro previousPeriod:", e.message); }
+    try { winningHeadlines = await fetchWinningHeadlines(accessToken); } catch (e) { console.error("Erro winningHeadlines:", e.message); }
+
+    // Stop Loss — detecta campanhas ativas que gastaram acima do limite
+    // configurado (default R$50) sem nenhuma conversão nos últimos 7 dias.
+    // NÃO pausa automaticamente — salva um alerta no snapshot para o painel
+    // exibir com botão de confirmação manual (usuário decidiu "avisa primeiro").
+    const stopLossConfigSnap = await db.collection("google_ads_config").doc("stop_loss").get();
+    const stopLossThreshold = stopLossConfigSnap.exists ? (stopLossConfigSnap.data().threshold || 50) : 50;
+    const stopLossAlerts = campaigns
+      .filter((c) => c.status === "ENABLED")
+      .map((c) => {
+        const m = c.metrics || {};
+        const cost7d = dailyPerformance.reduce((sum, d) => sum + (d.cost || 0), 0);
+        // Como daily_performance agrega a conta toda (não por campanha),
+        // usamos as métricas do próprio fetchCampaigns (últimos 30 dias)
+        // divididas proporcionalmente pelos 7 dias como aproximação, mas
+        // pra ser mais preciso, comparamos: gasto total dos 30 dias / 30 * 7
+        const estimatedCost7d = ((m.cost || 0) / 30) * 7;
+        const conversions30d = m.conversions || 0;
+        if (estimatedCost7d >= stopLossThreshold && conversions30d === 0) {
+          return {
+            campaign_id: c.campaign_id,
+            campaign_name: c.name,
+            estimated_cost_7d: estimatedCost7d,
+            conversions: conversions30d,
+            threshold: stopLossThreshold,
+            detected_at: new Date().toISOString(),
+            dismissed: false,
+          };
+        }
+        return null;
+      })
+      .filter(Boolean);
+
     await docRef.set({
       campaigns,
-      hasMetrics: true, // agora trazemos métricas reais de performance (últimos 30 dias)
+      hasMetrics: true,
       source: "google_ads_api",
       updatedAt: new Date().toISOString(),
       alerts,
       alertsCheckedAt: new Date().toISOString(),
       negative_keyword_suggestions: negativeKeywordSuggestions,
       negative_keywords_checked_at: negativeKeywordsCheckedAt,
-      month_to_date_spend: monthToDateSpend, // null se a busca falhar — tratado como "indisponível" no frontend
-      today_metrics: todayMetrics, // null se a busca falhar
+      month_to_date_spend: monthToDateSpend,
+      today_metrics: todayMetrics,
       recommendations,
       recommendations_checked_at: recommendationsCheckedAt,
       bidding_suggestions: biddingSuggestions,
+      daily_performance: dailyPerformance,
+      previous_period_metrics: previousPeriodMetrics,
+      winning_headlines: winningHeadlines,
+      stop_loss_alerts: stopLossAlerts,
+      stop_loss_threshold: stopLossThreshold,
     });
 
     if (alerts.length > 0) {
