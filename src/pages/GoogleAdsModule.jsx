@@ -42,6 +42,8 @@ export default function GoogleAdsModule() {
     recommendationsCheckedAt,
     biddingSuggestions,
     dailyPerformance,
+    daily15,
+    daily30,
     previousPeriodMetrics,
     winningHeadlines,
     loading,
@@ -219,6 +221,9 @@ export default function GoogleAdsModule() {
         <GioBrainDashboard
           campaigns={campaigns}
           dailyPerformance={dailyPerformance}
+          daily15={daily15}
+          daily30={daily30}
+          todayMetrics={todayMetrics}
           previousPeriodMetrics={previousPeriodMetrics}
           winningHeadlines={winningHeadlines}
           monthToDateSpend={monthToDateSpend}
