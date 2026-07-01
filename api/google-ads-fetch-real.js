@@ -1925,11 +1925,11 @@ function getPreviousPeriodEnd() {
   const d = new Date(); d.setDate(d.getDate() - 8); return d.toISOString().split("T")[0];
 }
 
-async function fetchDailyPerformance(accessToken) {
+async function fetchDailyPerformance(accessToken, period = "LAST_7_DAYS") {
   const query = `
     SELECT segments.date, metrics.clicks, metrics.impressions, metrics.cost_micros, metrics.conversions
     FROM customer
-    WHERE segments.date DURING LAST_7_DAYS
+    WHERE segments.date DURING ${period}
     ORDER BY segments.date ASC
   `;
   const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
@@ -2542,9 +2542,13 @@ export default async function handler(req, res) {
 
     // Novos dados pra painel estilo GioBrain — falhas não bloqueiam o snapshot
     let dailyPerformance = [];
+    let daily15 = [];
+    let daily30 = [];
     let previousPeriodMetrics = null;
     let winningHeadlines = [];
-    try { dailyPerformance = await fetchDailyPerformance(accessToken); } catch (e) { console.error("Erro dailyPerformance:", e.message); }
+    try { dailyPerformance = await fetchDailyPerformance(accessToken, "LAST_7_DAYS"); } catch (e) { console.error("Erro dailyPerformance:", e.message); }
+    try { daily15 = await fetchDailyPerformance(accessToken, "LAST_14_DAYS"); } catch (e) { console.error("Erro daily15:", e.message); }
+    try { daily30 = await fetchDailyPerformance(accessToken, "LAST_30_DAYS"); } catch (e) { console.error("Erro daily30:", e.message); }
     try { previousPeriodMetrics = await fetchPreviousPeriodMetrics(accessToken); } catch (e) { console.error("Erro previousPeriod:", e.message); }
     try { winningHeadlines = await fetchWinningHeadlines(accessToken); } catch (e) { console.error("Erro winningHeadlines:", e.message); }
 
@@ -2595,6 +2599,8 @@ export default async function handler(req, res) {
       recommendations_checked_at: recommendationsCheckedAt,
       bidding_suggestions: biddingSuggestions,
       daily_performance: dailyPerformance,
+      daily_performance_15: daily15,
+      daily_performance_30: daily30,
       previous_period_metrics: previousPeriodMetrics,
       winning_headlines: winningHeadlines,
       stop_loss_alerts: stopLossAlerts,
