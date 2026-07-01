@@ -2135,6 +2135,19 @@ export default async function handler(req, res) {
 
   // Stop Loss — ações que só tocam no Firestore, sem precisar das
   // credenciais da Google Ads API, por isso ficam antes da checagem.
+  if (action === "clear_all_negative_suggestions") {
+    try {
+      const db = getAdminDb();
+      await db.collection("google_ads_snapshot").doc("current").update({
+        negative_keyword_suggestions: [],
+        negative_keywords_checked_at: null,
+      });
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
   if (action === "dismiss_stop_loss") {
     try {
       const { campaign_id } = req.body;
