@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { TrendingUp, TrendingDown, Minus } from "lucide-react";
 
 /**
@@ -150,45 +151,71 @@ function DonutChart({ campaigns }) {
   );
 }
 
-export default function GioBrainDashboard({ campaigns, dailyPerformance, previousPeriodMetrics, winningHeadlines, monthToDateSpend }) {
+export default function GioBrainDashboard({ campaigns, dailyPerformance, daily15, daily30, todayMetrics, previousPeriodMetrics, winningHeadlines, monthToDateSpend }) {
+  const [period, setPeriod] = useState("7");
+
   if (!campaigns || campaigns.length === 0) return null;
 
-  // Métricas do período atual (últimos 7 dias do daily_performance)
-  const currentPeriod = dailyPerformance.reduce(
-    (acc, d) => ({ clicks: acc.clicks + d.clicks, impressions: acc.impressions + d.impressions, cost: acc.cost + d.cost, conversions: acc.conversions + d.conversions }),
-    { clicks: 0, impressions: 0, cost: 0, conversions: 0 }
-  );
-  const prev = previousPeriodMetrics;
+  // Seleciona o dataset conforme o período escolhido
+  const dataMap = { "7": dailyPerformance, "15": daily15, "30": daily30 };
+  const selectedData = period === "today"
+    ? (todayMetrics ? [{ date: "Hoje", ...todayMetrics, cost: todayMetrics.cost }] : [])
+    : (dataMap[period] || []);
+
+  // Agrega o período selecionado
+  const currentPeriod = period === "today" && todayMetrics
+    ? { clicks: todayMetrics.clicks, impressions: todayMetrics.impressions, cost: todayMetrics.cost, conversions: todayMetrics.conversions }
+    : selectedData.reduce(
+        (acc, d) => ({ clicks: acc.clicks + d.clicks, impressions: acc.impressions + d.impressions, cost: acc.cost + d.cost, conversions: acc.conversions + d.conversions }),
+        { clicks: 0, impressions: 0, cost: 0, conversions: 0 }
+      );
+
+  const prev = period === "7" ? previousPeriodMetrics : null; // variação % só pra 7 dias (período anterior disponível)
   const ctr = currentPeriod.impressions > 0 ? (currentPeriod.clicks / currentPeriod.impressions) * 100 : 0;
   const cpc = currentPeriod.clicks > 0 ? currentPeriod.cost / currentPeriod.clicks : 0;
 
+  const PERIODS = [
+    { key: "today", label: "Hoje" },
+    { key: "7", label: "7 dias" },
+    { key: "15", label: "15 dias" },
+    { key: "30", label: "30 dias" },
+  ];
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* Métricas com variação % */}
+      {/* Métricas com seletor de período */}
       <div className="card">
-        <div className="card-title" style={{ marginBottom: 12 }}>📊 Últimos 7 dias</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div className="card-title" style={{ margin: 0 }}>📊 Desempenho</div>
+          <div style={{ display: "flex", gap: 4 }}>
+            {PERIODS.map((p) => (
+              <button
+                key={p.key}
+                onClick={() => setPeriod(p.key)}
+                className={period === p.key ? "btn btn-teal btn-sm" : "btn btn-outline btn-sm"}
+                style={{ padding: "4px 10px", fontSize: 12 }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <MetricCard label="Impressões" value={currentPeriod.impressions.toLocaleString("pt-BR")} pctValue={pct(currentPeriod.impressions, prev?.impressions)} />
-          <MetricCard label="Cliques" value={currentPeriod.clicks.toLocaleString("pt-BR")} pctValue={pct(currentPeriod.clicks, prev?.clicks)} />
-          <MetricCard label="CTR" value={`${ctr.toFixed(2)}%`} pctValue={pct(ctr, prev?.impressions > 0 ? (prev.clicks / prev.impressions) * 100 : null)} />
+          <MetricCard label="Impressões" value={currentPeriod.impressions.toLocaleString("pt-BR")} pctValue={prev ? pct(currentPeriod.impressions, prev.impressions) : null} />
+          <MetricCard label="Cliques" value={currentPeriod.clicks.toLocaleString("pt-BR")} pctValue={prev ? pct(currentPeriod.clicks, prev.clicks) : null} />
+          <MetricCard label="CTR" value={`${ctr.toFixed(2)}%`} pctValue={null} />
           <MetricCard label="CPC Médio" value={`R$ ${cpc.toFixed(2)}`} pctValue={null} />
-          <MetricCard label="Conversões" value={currentPeriod.conversions.toFixed(0)} pctValue={pct(currentPeriod.conversions, prev?.conversions)} />
-          <MetricCard label="Custo (7d)" value={`R$ ${currentPeriod.cost.toFixed(2)}`} pctValue={pct(currentPeriod.cost, prev?.cost)} />
+          <MetricCard label="Conversões" value={currentPeriod.conversions.toFixed(0)} pctValue={prev ? pct(currentPeriod.conversions, prev.conversions) : null} />
+          <MetricCard label="Custo" value={`R$ ${currentPeriod.cost.toFixed(2)}`} pctValue={prev ? pct(currentPeriod.cost, prev.cost) : null} />
         </div>
       </div>
 
-      {/* Gráfico de linha */}
-      {dailyPerformance.length >= 2 && (
+      {/* Gráfico de linha — usa o período selecionado, exceto "Hoje" que
+          tem só 1 ponto (sem gráfico de linha útil) */}
+      {period !== "today" && selectedData.length >= 2 && (
         <div className="card">
           <div className="card-title" style={{ marginBottom: 12 }}>📈 Evolução Diária</div>
-          <LineChart
-            data={dailyPerformance}
-            xKey="date"
-            lines={[
-              { key: "impressions", label: "Impressões" },
-              { key: "clicks", label: "Cliques" },
-            ]}
-          />
+          <LineChart data={selectedData} xKey="date" lines={[{ key: "impressions", label: "Impressões" }, { key: "clicks", label: "Cliques" }]} />
         </div>
       )}
 
