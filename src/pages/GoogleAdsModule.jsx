@@ -360,6 +360,23 @@ export default function GoogleAdsModule() {
         <div className="card">
           <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>🎯 Sugestões de palavras-chave negativas ({visibleSuggestions.length})</span>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={async () => {
+                if (!confirm("Limpar todas as sugestões? Elas voltarão apenas se a próxima sincronização identificar novos termos problemáticos.")) return;
+                try {
+                  await fetch("/api/google-ads-fetch-real", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "x-panel-trigger": "lcs-hub-optimizations-panel" },
+                    body: JSON.stringify({ action: "clear_all_negative_suggestions" }),
+                  });
+                } catch (err) {
+                  console.error("Erro ao limpar sugestões:", err);
+                }
+              }}
+            >
+              🗑 Limpar todas
+            </button>
           </div>
           <p className="muted" style={{ marginTop: 4, marginBottom: 14 }}>
             Termos de pesquisa reais que geraram cliques pagos nos últimos 30 dias sem nenhuma
