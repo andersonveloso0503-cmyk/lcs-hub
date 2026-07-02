@@ -813,7 +813,7 @@ export default async function handler(req, res) {
   // de um arquivo próprio, para não passar do limite de 12 funções
   // serverless do plano Hobby da Vercel) — ver detalhes nas funções
   // analyzeProfileWithAI/generateDarkCardCreative abaixo.
-  if (action === "analyze_profile" || action === "generate_dark_card") {
+  if (action === "analyze_profile" || action === "generate_dark_card" || action === "analyze_top_posts") {
     try {
       if (action === "analyze_profile") {
         if (!process.env.FACEBOOK_PAGE_ACCESS_TOKEN || !process.env.FACEBOOK_PAGE_ID) {
