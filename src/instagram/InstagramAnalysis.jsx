@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Sparkles, RefreshCw, Check, X, AlertTriangle, Image as ImageIcon, Download } from "lucide-react";
 import ReelCreator from "./ReelCreator";
+import CarouselCreator from "./CarouselCreator";
+import LearningCard from "./LearningCard";
 
 const SERVICE_OPTIONS = [
   "portaria de condomínio",
@@ -245,6 +247,8 @@ export default function InstagramAnalysis() {
   return (
     <div>
       <ProfileAnalysis />
+      <LearningCard />
+      <CarouselCreator />
       <ReelCreator />
       <DarkCardGenerator />
     </div>
