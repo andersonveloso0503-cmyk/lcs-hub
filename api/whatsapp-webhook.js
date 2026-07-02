@@ -60,6 +60,18 @@ const EMPRESA_PRESENTATION_URL = process.env.EMPRESA_PRESENTATION_URL || "";
 
 // WhatsApp do especialista que recebe os dados de cada orçamento finalizado.
 const ESPECIALISTA_WHATSAPP = process.env.ESPECIALISTA_WHATSAPP || "5551985025102";
+
+// URLs públicas (Vercel Blob) dos PDFs de proposta por serviço/modalidade.
+// Configure cada uma como variável de ambiente no Vercel após subir os PDFs no Blob.
+const PDF_PROPOSTAS = {
+  portaria_24h:       process.env.PDF_PORTARIA_24H       || "",
+  portaria_12h:       process.env.PDF_PORTARIA_12H       || "",
+  limpeza_8h_sexta:   process.env.PDF_LIMPEZA_8H_SEXTA   || "",
+  limpeza_8h_sabado:  process.env.PDF_LIMPEZA_8H_SABADO  || "",
+  limpeza_4h_sabado:  process.env.PDF_LIMPEZA_4H_SABADO  || "",
+  limpeza_4h_sexta:   process.env.PDF_LIMPEZA_4H_SEXTA   || "",
+  zeladoria_8h_sabado:process.env.PDF_ZELADORIA_8H_SABADO|| "",
+};
 // Projeto Firebase para envio de push notifications (FCM)
 const FCM_PROJECT_ID = "lcscrm";
 
@@ -729,6 +741,90 @@ function finalizarOrcamento(data) {
   };
 }
 
+/**
+ * Determina qual PDF de proposta enviar com base no serviço e carga horária.
+ * Retorna { url, fileName } ou null se não houver correspondência.
+ */
+function selecionarPdfProposta(data) {
+  const servico = (data.servico || "").toLowerCase();
+  const carga = (data.cargaHoraria || "").toLowerCase();
+  const tipo = (data.tipoPortaria || "").toLowerCase();
+
+  if (servico === "portaria") {
+    if (tipo.includes("24")) return { url: PDF_PROPOSTAS.portaria_24h, fileName: "Proposta_Portaria_24h_LCS.pdf" };
+    if (tipo.includes("12")) return { url: PDF_PROPOSTAS.portaria_12h, fileName: "Proposta_Portaria_12h_LCS.pdf" };
+  }
+
+  if (servico === "limpeza") {
+    const isSabado = carga.includes("sáb") || carga.includes("sab") || carga.includes("44h") || carga.includes("44 h");
+    const is8h = carga.includes("8");
+    const is4h = carga.includes("4");
+    if (is8h && isSabado) return { url: PDF_PROPOSTAS.limpeza_8h_sabado,  fileName: "Proposta_Limpeza_8h_SegSab_LCS.pdf" };
+    if (is8h)             return { url: PDF_PROPOSTAS.limpeza_8h_sexta,   fileName: "Proposta_Limpeza_8h_SegSex_LCS.pdf" };
+    if (is4h && isSabado) return { url: PDF_PROPOSTAS.limpeza_4h_sabado,  fileName: "Proposta_Limpeza_4h_SegSab_LCS.pdf" };
+    if (is4h)             return { url: PDF_PROPOSTAS.limpeza_4h_sexta,   fileName: "Proposta_Limpeza_4h_SegSex_LCS.pdf" };
+  }
+
+  if (servico === "zeladoria") {
+    return { url: PDF_PROPOSTAS.zeladoria_8h_sabado, fileName: "Proposta_Zeladoria_8h_SegSab_LCS.pdf" };
+  }
+
+  return null; // fallback: nenhum PDF mapeado → envia mensagem genérica
+}
+
+/**
+ * Envia a proposta personalizada após 4 minutos da apresentação.
+ * Roda de forma assíncrona — não bloqueia o fluxo principal do webhook.
+ * Se não houver PDF mapeado, envia mensagem de que o orçamento está sendo elaborado.
+ */
+async function agendarEnvioProposta({ phone, data }) {
+  await new Promise((resolve) => setTimeout(resolve, 4 * 60 * 1000)); // aguarda 4 min
+
+  const proposta = selecionarPdfProposta(data);
+  const servico = data.servico || "serviço";
+
+  try {
+    if (proposta && proposta.url) {
+      // PDF específico encontrado — envia mensagem + documento
+      const msgProposta =
+        `Olá! 😊 Conforme prometido, segue a proposta comercial da *LCS Terceirização* para o serviço de *${servico}*.\n\n` +
+        `📋 Incluído na proposta:\n` +
+        `• Funcionário(s) uniformizado(s)\n` +
+        `• Regime CLT com todos os encargos\n` +
+        `• Troca imediata em caso de falta\n` +
+        `• Supervisão diária\n` +
+        `• Nota Fiscal\n` +
+        `• Todos os documentos e impostos incluídos\n\n` +
+        `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
+        `• CFTV — câmeras de monitoramento\n` +
+        `• Leitores de placa veicular\n` +
+        `• Biometria facial\n` +
+        `_Esses serviços podem ser orçados separadamente conforme sua necessidade._\n\n` +
+        `Qualquer dúvida ou ajuste necessário, é só nos chamar! 🤝\n` +
+        `📞 (51) 3058-6391 / 99889-3033`;
+
+      await sendText(phone, msgProposta);
+      await sendDocumentFromUrl(phone, proposta.url, proposta.fileName, "📄 Proposta Comercial LCS Terceirização");
+    } else {
+      // Nenhum PDF específico — envia mensagem de que o orçamento está sendo elaborado
+      const msgGenerica =
+        `Olá! 😊 Estamos finalizando o orçamento personalizado para o serviço de *${servico}* solicitado.\n\n` +
+        `Em breve nossa equipe entrará em contato com todos os detalhes e valores. ⏳\n\n` +
+        `🔒 Enquanto isso, saiba que além do serviço solicitado, trabalhamos também com:\n` +
+        `• CFTV — câmeras de monitoramento\n` +
+        `• Leitores de placa veicular\n` +
+        `• Biometria facial\n` +
+        `_Esses serviços podem ser orçados separadamente, caso tenha interesse._\n\n` +
+        `Obrigado pela preferência! Qualquer dúvida, estamos à disposição. 🤝\n` +
+        `📞 (51) 3058-6391 / 99889-3033`;
+
+      await sendText(phone, msgGenerica);
+    }
+  } catch (err) {
+    console.error("Erro ao enviar proposta agendada:", err);
+  }
+}
+
 function handleCurriculoAguardando(incoming, state) {
   return {
     replies: [
@@ -998,6 +1094,11 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
     } catch (notifyErr) {
       console.error("Erro ao notificar especialista sobre o orçamento:", notifyErr);
     }
+
+    // Agenda envio da proposta PDF específica após 4 minutos (não bloqueia)
+    agendarEnvioProposta({ phone, data: result.saveQuote }).catch((err) =>
+      console.error("Erro no agendamento da proposta:", err)
+    );
   }
 
   if (result.saveSupplierCategory) {
