@@ -118,8 +118,9 @@ async function fetchInstagramProfile(igAccountId) {
 }
 
 async function fetchRecentMedia(igAccountId) {
+  // Busca 25 posts (em vez de 12) pra ter amostra maior pro aprendizado
   const fields = "caption,media_type,media_product_type,like_count,comments_count,timestamp,permalink";
-  const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}/media?fields=${fields}&limit=12&access_token=${process.env.FACEBOOK_PAGE_ACCESS_TOKEN}`;
+  const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}/media?fields=${fields}&limit=25&access_token=${process.env.FACEBOOK_PAGE_ACCESS_TOKEN}`;
   const res = await fetch(url);
   const data = await res.json();
   if (data.error) {
@@ -127,6 +128,91 @@ async function fetchRecentMedia(igAccountId) {
     return [];
   }
   return data.data || [];
+}
+
+/**
+ * Busca métricas detalhadas (reach, saved, impressions) de um post
+ * individual via /insights — campos que não vêm no /media básico.
+ * Usado pelo sistema de aprendizado pra calcular engajamento real.
+ */
+async function fetchPostInsights(mediaId) {
+  const metrics = "reach,saved,impressions,engagement";
+  const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${mediaId}/insights?metric=${metrics}&access_token=${process.env.FACEBOOK_PAGE_ACCESS_TOKEN}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.error) return {};
+  const result = {};
+  for (const item of data.data || []) {
+    result[item.name] = item.values?.[0]?.value || 0;
+  }
+  return result;
+}
+
+/**
+ * Analisa os posts recentes e identifica padrões dos que mais performaram
+ * — tipo de conteúdo, horário, palavras-chave nas legendas, taxa de
+ * engajamento. Retorna um "perfil de aprendizado" que a IA usa como
+ * contexto pra gerar novos posts mais parecidos com o que já funcionou.
+ */
+async function analyzeTopPosts(igAccountId, recentMedia) {
+  // Calcula engajamento relativo (curtidas + comentários) pra cada post
+  const withEngagement = recentMedia
+    .filter((m) => m.like_count !== undefined)
+    .map((m) => ({
+      ...m,
+      engagement: (m.like_count || 0) + (m.comments_count || 0) * 3, // comentário vale mais
+      hour: new Date(m.timestamp).getHours(),
+      dayOfWeek: new Date(m.timestamp).toLocaleDateString("pt-BR", { weekday: "long" }),
+      mediaTypeLabel: m.media_product_type || m.media_type || "IMAGE",
+    }))
+    .sort((a, b) => b.engagement - a.engagement);
+
+  if (withEngagement.length === 0) return null;
+
+  const topPosts = withEngagement.slice(0, Math.max(3, Math.floor(withEngagement.length * 0.3)));
+  const allPosts = withEngagement;
+
+  // Tipo de conteúdo que mais performa
+  const typeCount = {};
+  for (const p of topPosts) {
+    typeCount[p.mediaTypeLabel] = (typeCount[p.mediaTypeLabel] || 0) + 1;
+  }
+  const bestType = Object.entries(typeCount).sort((a, b) => b[1] - a[1])[0]?.[0] || "IMAGE";
+
+  // Horário de publicação dos posts com mais engajamento
+  const avgHour = Math.round(topPosts.reduce((sum, p) => sum + p.hour, 0) / topPosts.length);
+
+  // Taxa de engajamento média da conta (top vs todos)
+  const avgEngagementAll = allPosts.reduce((sum, p) => sum + p.engagement, 0) / allPosts.length;
+  const avgEngagementTop = topPosts.reduce((sum, p) => sum + p.engagement, 0) / topPosts.length;
+
+  // Palavras mais usadas nas legendas dos posts com mais engajamento
+  const captionWords = topPosts
+    .flatMap((p) => (p.caption || "").toLowerCase().split(/\s+/))
+    .filter((w) => w.length > 4 && !w.startsWith("#") && !w.startsWith("@"))
+    .reduce((acc, w) => { acc[w] = (acc[w] || 0) + 1; return acc; }, {});
+  const topWords = Object.entries(captionWords)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([w]) => w);
+
+  return {
+    total_posts_analyzed: allPosts.length,
+    top_posts_count: topPosts.length,
+    best_content_type: bestType,
+    best_posting_hour: avgHour,
+    avg_engagement_top: Math.round(avgEngagementTop),
+    avg_engagement_all: Math.round(avgEngagementAll),
+    engagement_lift: avgEngagementAll > 0 ? ((avgEngagementTop / avgEngagementAll - 1) * 100).toFixed(0) + "%" : "N/A",
+    top_caption_words: topWords,
+    top_posts_preview: topPosts.slice(0, 3).map((p) => ({
+      caption_preview: (p.caption || "").slice(0, 100),
+      likes: p.like_count || 0,
+      comments: p.comments_count || 0,
+      type: p.mediaTypeLabel,
+      hour: p.hour,
+    })),
+  };
 }
 
 /**
@@ -588,6 +674,134 @@ Responda APENAS um JSON neste formato, sem texto antes ou depois:
   }
 }
 
+
+/**
+ * Carrossel — gera roteiro de 3 slides via IA com tema, texto e
+ * descrição de cena pra cada slide, mais a legenda completa do post.
+ */
+async function generateCarouselScript(learning = null) {
+  const themes = [
+    "Por que terceirizar a portaria do seu condomínio",
+    "5 sinais de que sua limpeza predial precisa de melhoria",
+    "Como a LCS Terceirização protege seu patrimônio",
+    "Diferença entre empresa de portaria boa e ruim",
+    "O que avaliar ao contratar facilities em Porto Alegre",
+  ];
+  const theme = themes[Math.floor(Math.random() * themes.length)];
+
+  const learningContext = learning
+    ? `\n\nCONTEXTO DE APRENDIZADO (baseado nos ${learning.total_posts_analyzed} posts mais recentes da conta):
+- Tipo de conteúdo com maior engajamento: ${learning.best_content_type}
+- Horário de melhor desempenho: ${learning.best_posting_hour}h
+- Palavras mais usadas nos posts de sucesso: ${learning.top_caption_words.join(", ")}
+- Engajamento médio dos top posts: ${learning.avg_engagement_top} interações
+- Top posts de referência: ${learning.top_posts_preview.map((p) => `"${p.caption_preview}..." (${p.likes} curtidas, ${p.comments} comentários)`).join(" | ")}
+
+Use esse contexto pra gerar conteúdo parecido com o que já performa bem nessa conta.`
+    : "";
+
+  const prompt = `Você é criador de conteúdo para Instagram de uma empresa brasileira de terceirização (limpeza, portaria, facilities) em Porto Alegre, RS, chamada LCS Terceirização.
+
+Crie um carrossel de 3 slides sobre o tema: "${theme}".${learningContext}
+
+Para cada slide:
+- scene_description: cena fotográfica REALISTA em INGLÊS pra gerar a imagem de fundo via IA (ambiente profissional relacionado ao tema)  
+- headline: texto principal CURTO em PORTUGUÊS (máx 8 palavras, impactante, estilo carrossel Instagram)
+- subtext: subtítulo complementar em PORTUGUÊS (máx 15 palavras)
+
+O slide 1 deve ser a capa/gancho, os slides 2-3 aprofundam o tema, o slide 3 termina com CTA.
+
+Responda APENAS JSON sem texto antes ou depois:
+{"theme": "...", "slides": [{"scene_description": "...", "headline": "...", "subtext": "..."}], "caption": "legenda completa com 3 hashtags relevantes"}`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || "Erro ao gerar roteiro do carrossel");
+  const text = data.content?.[0]?.text || "{}";
+  try { return JSON.parse(text.replace(/```json|```/g, "").trim()); }
+  catch { throw new Error("IA retornou formato inválido no roteiro do carrossel."); }
+}
+
+/**
+ * Gera UMA imagem de slide do carrossel via IA — visual estilo card
+ * escuro com headline sobreposto, fundo foto profissional. Formato
+ * quadrado (1:1) que o Instagram recomenda pra carrosseis.
+ */
+async function generateCarouselSlideImage(sceneDescription, headline, subtext) {
+  const prompt = `Professional Instagram carousel slide for LCS Terceirização (cleaning, security/portaria, facilities company in Porto Alegre, Brazil).
+
+Background: ${sceneDescription}, slightly darkened with navy blue gradient overlay.
+Large bold white text card near top: "${headline}"
+Smaller white text below: "${subtext}"
+Bottom: subtle "LCS Terceirização" branding.
+Style: clean, corporate, high contrast, square 1:1 format, suitable for Instagram carousel. No logos, no watermarks.`;
+
+  const imageBase64 = await generateWithOpenAI(prompt, "1024x1024");
+  const matches = imageBase64.match(/^data:(image\/\w+);base64,(.+)$/);
+  const buffer = Buffer.from(matches[2], "base64");
+  return uploadToBlob(buffer, `carousel-slide-${Date.now()}.png`, matches[1]);
+}
+
+/**
+ * Cria UM container filho de carrossel no Instagram.
+ * Cada imagem do carrossel precisa de um container próprio com
+ * is_carousel_item=true antes de criar o container pai.
+ */
+async function createCarouselItemContainer(igAccountId, imageUrl) {
+  const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}/media`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image_url: imageUrl, is_carousel_item: "true", access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(`Erro ao criar container filho: ${data.error.message}`);
+  return data.id;
+}
+
+/**
+ * Cria o container pai do carrossel, referenciando os IDs dos filhos.
+ */
+async function createCarouselContainer(igAccountId, childrenIds, caption) {
+  const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}/media`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ media_type: "CAROUSEL", children: childrenIds.join(","), caption, access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(`Erro ao criar container pai do carrossel: ${data.error.message}`);
+  return data.id;
+}
+
+/**
+ * Verifica status UMA VEZ e publica se FINISHED — mesmo padrão de
+ * polling do Reel (sem loop interno, o frontend chama repetidamente).
+ */
+async function checkAndPublishCarousel(igAccountId, containerId) {
+  const statusRes = await fetch(
+    `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${containerId}?fields=status_code&access_token=${process.env.FACEBOOK_PAGE_ACCESS_TOKEN}`
+  );
+  const statusData = await statusRes.json();
+  if (statusData.status_code === "ERROR" || statusData.status_code === "EXPIRED") {
+    throw new Error(`Processamento do carrossel falhou: ${statusData.status_code}`);
+  }
+  if (statusData.status_code !== "FINISHED") {
+    return { status: statusData.status_code, published: false };
+  }
+  const publishRes = await fetch(
+    `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/${igAccountId}/media_publish`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ creation_id: containerId, access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN }) }
+  );
+  const publishData = await publishRes.json();
+  if (publishData.error) throw new Error(`Erro ao publicar carrossel: ${publishData.error.message}`);
+  return { status: "FINISHED", published: true, mediaId: publishData.id };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -612,7 +826,19 @@ export default async function handler(req, res) {
         const profile = await fetchInstagramProfile(igAccountId);
         const recentMedia = await fetchRecentMedia(igAccountId);
         const analysis = await analyzeProfileWithAI(profile, recentMedia);
-        return res.status(200).json({ ok: true, profile, recent_media_count: recentMedia.length, ...analysis });
+        const learning = await analyzeTopPosts(igAccountId, recentMedia);
+        return res.status(200).json({ ok: true, profile, recent_media_count: recentMedia.length, ...analysis, learning });
+      }
+
+      if (action === "analyze_top_posts") {
+        // Ação separada pra buscar só o aprendizado, sem re-analisar o perfil completo
+        if (!process.env.FACEBOOK_PAGE_ACCESS_TOKEN) {
+          return res.status(500).json({ error: "FACEBOOK_PAGE_ACCESS_TOKEN não configurado." });
+        }
+        const igAccountId = await getInstagramAccountId();
+        const recentMedia = await fetchRecentMedia(igAccountId);
+        const learning = await analyzeTopPosts(igAccountId, recentMedia);
+        return res.status(200).json({ ok: true, learning });
       }
 
       if (action === "generate_dark_card") {
@@ -713,6 +939,82 @@ export default async function handler(req, res) {
       }
     } catch (err) {
       console.error(`Erro na ação de Reels "${action}":`, err);
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // Carrossel — fluxo dividido em etapas curtas, igual aos Reels.
+  // O frontend (CarouselCreator.jsx) orquestra a sequência completa.
+  const CAROUSEL_ACTIONS = [
+    "generate_carousel_script",
+    "generate_carousel_slide_image",
+    "create_carousel_item_container",
+    "create_carousel_container",
+    "check_and_publish_carousel",
+  ];
+  if (CAROUSEL_ACTIONS.includes(action)) {
+    try {
+      if (action === "generate_carousel_script") {
+        if (!process.env.ANTHROPIC_API_KEY) {
+          return res.status(500).json({ error: "ANTHROPIC_API_KEY não configurada." });
+        }
+        // Busca o contexto de aprendizado automaticamente pra informar a IA
+        let learning = null;
+        if (process.env.FACEBOOK_PAGE_ACCESS_TOKEN) {
+          try {
+            const igAccountId = await getInstagramAccountId();
+            const recentMedia = await fetchRecentMedia(igAccountId);
+            learning = await analyzeTopPosts(igAccountId, recentMedia);
+          } catch (e) {
+            console.error("Erro ao buscar aprendizado (segue sem esse contexto):", e.message);
+          }
+        }
+        const script = await generateCarouselScript(learning);
+        return res.status(200).json({ ok: true, ...script, learning });
+      }
+
+      if (action === "generate_carousel_slide_image") {
+        const { scene_description, headline, subtext } = req.body;
+        if (!scene_description || !headline) {
+          return res.status(400).json({ error: "scene_description e headline são obrigatórios." });
+        }
+        if (!process.env.OPENAI_API_KEY) {
+          return res.status(500).json({ error: "OPENAI_API_KEY não configurada." });
+        }
+        const url = await generateCarouselSlideImage(scene_description, headline, subtext || "");
+        return res.status(200).json({ ok: true, url });
+      }
+
+      if (action === "create_carousel_item_container") {
+        const { image_url } = req.body;
+        if (!image_url) return res.status(400).json({ error: "image_url é obrigatório." });
+        if (!process.env.FACEBOOK_PAGE_ACCESS_TOKEN) {
+          return res.status(500).json({ error: "FACEBOOK_PAGE_ACCESS_TOKEN não configurado." });
+        }
+        const igAccountId = await getInstagramAccountId();
+        const containerId = await createCarouselItemContainer(igAccountId, image_url);
+        return res.status(200).json({ ok: true, container_id: containerId, ig_account_id: igAccountId });
+      }
+
+      if (action === "create_carousel_container") {
+        const { children_ids, caption, ig_account_id } = req.body;
+        if (!Array.isArray(children_ids) || children_ids.length < 2) {
+          return res.status(400).json({ error: "children_ids (array com pelo menos 2 IDs) é obrigatório." });
+        }
+        const containerId = await createCarouselContainer(ig_account_id, children_ids, caption || "");
+        return res.status(200).json({ ok: true, container_id: containerId });
+      }
+
+      if (action === "check_and_publish_carousel") {
+        const { container_id, ig_account_id } = req.body;
+        if (!container_id || !ig_account_id) {
+          return res.status(400).json({ error: "container_id e ig_account_id são obrigatórios." });
+        }
+        const result = await checkAndPublishCarousel(ig_account_id, container_id);
+        return res.status(200).json({ ok: true, ...result });
+      }
+    } catch (err) {
+      console.error(`Erro na ação de Carrossel "${action}":`, err);
       return res.status(500).json({ error: err.message });
     }
   }
