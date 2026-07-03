@@ -670,25 +670,6 @@ function handleOrcamentoMenu(incoming) {
   if (incoming === "0") {
     return { replies: [mainMenuMessage()], newState: emptyState() };
   }
-
-  // Se pedir email
-  const incomingLower = incoming.toLowerCase();
-  if (
-    incomingLower.includes("email") ||
-    incomingLower.includes("e-mail") ||
-    incomingLower.includes("manda no email") ||
-    incomingLower.includes("enviar por email")
-  ) {
-    return {
-      replies: [
-        "Claro! 📧 Você pode enviar sua solicitação de orçamento diretamente para o nosso e-mail:\n\n" +
-        "*lcs@lcsterceirizacao.com.br*\n\n" +
-        "Nossa equipe retornará em breve com todos os detalhes. 😊",
-      ],
-      newState: emptyState(),
-    };
-  }
-
   const servico = SERVICOS_ORCAMENTO[incoming];
   if (!servico) {
     return { replies: ["Não entendi 🤔\n\n" + ORCAMENTO_MENU_TEXT], newState: { menu: "orcamento", step: 0, data: {} } };
@@ -704,27 +685,6 @@ function handleOrcamentoMenu(incoming) {
 function handleOrcamentoFluxo(incoming, state) {
   const data = { ...state.data };
   const servico = data.servico;
-
-  // Se o cliente pedir envio por email em qualquer etapa do fluxo
-  const incomingLower = incoming.toLowerCase();
-  if (
-    incomingLower.includes("email") ||
-    incomingLower.includes("e-mail") ||
-    incomingLower.includes("correio") ||
-    incomingLower.includes("mandar por email") ||
-    incomingLower.includes("enviar por email") ||
-    incomingLower.includes("manda no email")
-  ) {
-    return {
-      replies: [
-        "Claro! 📧 Você pode enviar sua solicitação de orçamento diretamente para o nosso e-mail:\n\n" +
-        "*lcs@lcsterceirizacao.com.br*\n\n" +
-        "Nossa equipe retornará em breve com todos os detalhes. 😊\n\n" +
-        "Se preferir continuar aqui pelo WhatsApp, é só me dizer o serviço desejado!",
-      ],
-      newState: emptyState(),
-    };
-  }
 
   if (state.step === 1) {
     const tipo = TIPOS_PORTARIA[incoming];
@@ -1136,6 +1096,41 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
     } catch (notifyErr) {
       console.error("Erro ao notificar especialista sobre o orçamento:", notifyErr);
     }
+
+    // Envia mensagem descontraída + PDF da proposta em background (sem bloquear)
+    // Usa setTimeout de 30s — dentro do limite de 60s do Vercel Hobby
+    setTimeout(async () => {
+      try {
+        const nome = pushName ? pushName.split(" ")[0] : "";
+        const servico = result.saveQuote.servico || "serviço";
+        const proposta = selecionarPdfProposta(result.saveQuote);
+
+        await sendText(phone,
+          `Peraê${nome ? " " + nome : ""}... já estou elaborando a proposta aqui, me dá um tempinho! ⏳`
+        );
+
+        if (proposta && proposta.url) {
+          await sendDocumentFromUrl(phone, proposta.url, proposta.fileName, "Pronto! 😊 Segue a proposta comercial da *LCS Terceirização*:");
+        } else {
+          await sendText(phone,
+            `Pronto! 😊 Nossa equipe já está finalizando os detalhes e entrará em contato em breve! 🤝\n\n` +
+            `📞 (51) 3058-6391 / 99889-3033`
+          );
+        }
+
+        // Adiciona mensagem sobre serviços extras
+        await sendText(phone,
+          `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
+          `• CFTV — câmeras de monitoramento\n` +
+          `• Leitores de placa veicular\n` +
+          `• Biometria facial\n\n` +
+          `_Esses serviços podem ser orçados separadamente. Qualquer dúvida é só chamar!_ 😊`
+        );
+
+      } catch (err) {
+        console.error("Erro ao enviar proposta imediata:", err);
+      }
+    }, 30000);
   }
 
   if (result.saveSupplierCategory) {
