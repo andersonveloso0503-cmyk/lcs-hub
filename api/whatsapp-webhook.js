@@ -1097,40 +1097,36 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
       console.error("Erro ao notificar especialista sobre o orçamento:", notifyErr);
     }
 
-    // Envia mensagem descontraída + PDF da proposta em background (sem bloquear)
-    // Usa setTimeout de 30s — dentro do limite de 60s do Vercel Hobby
-    setTimeout(async () => {
-      try {
-        const nome = pushName ? pushName.split(" ")[0] : "";
-        const servico = result.saveQuote.servico || "serviço";
-        const proposta = selecionarPdfProposta(result.saveQuote);
+    // Envia mensagem + PDF da proposta diretamente (sem delay)
+    try {
+      const nome = pushName ? pushName.split(" ")[0] : "";
+      const proposta = selecionarPdfProposta(result.saveQuote);
 
-        await sendText(phone,
-          `Peraê${nome ? " " + nome : ""}... já estou elaborando a proposta aqui, me dá um tempinho! ⏳`
+      await sendText(phone,
+        `Peraê${nome ? " " + nome : ""}... 🤔💭 já estou elaborando a proposta aqui, me dá um tempinho!`
+      );
+
+      if (proposta && proposta.url) {
+        await sendDocumentFromUrl(phone, proposta.url, proposta.fileName,
+          `Pronto! 🎉 Segue a proposta comercial da *LCS Terceirização*!`
         );
-
-        if (proposta && proposta.url) {
-          await sendDocumentFromUrl(phone, proposta.url, proposta.fileName, "Pronto! 😊 Segue a proposta comercial da *LCS Terceirização*:");
-        } else {
-          await sendText(phone,
-            `Pronto! 😊 Nossa equipe já está finalizando os detalhes e entrará em contato em breve! 🤝\n\n` +
-            `📞 (51) 3058-6391 / 99889-3033`
-          );
-        }
-
-        // Adiciona mensagem sobre serviços extras
+      } else {
         await sendText(phone,
-          `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
-          `• CFTV — câmeras de monitoramento\n` +
-          `• Leitores de placa veicular\n` +
-          `• Biometria facial\n\n` +
-          `_Esses serviços podem ser orçados separadamente. Qualquer dúvida é só chamar!_ 😊`
+          `Pronto! 😊 Nossa equipe já está finalizando os detalhes e entrará em contato em breve! 🤝\n\n` +
+          `📞 (51) 3058-6391 / 99889-3033`
         );
-
-      } catch (err) {
-        console.error("Erro ao enviar proposta imediata:", err);
       }
-    }, 10000);
+
+      await sendText(phone,
+        `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
+        `• 📹 CFTV — câmeras de monitoramento\n` +
+        `• 🚗 Leitores de placa veicular\n` +
+        `• 👤 Biometria facial\n\n` +
+        `_Esses serviços podem ser orçados separadamente. Qualquer dúvida é só chamar!_ 😊`
+      );
+    } catch (err) {
+      console.error("Erro ao enviar proposta:", err);
+    }
   }
 
   if (result.saveSupplierCategory) {
