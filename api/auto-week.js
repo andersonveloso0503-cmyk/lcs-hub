@@ -1,3 +1,4 @@
+// testte
 // /api/auto-week.js
 //
 // Cron que roda todo dia às 10h UTC (07h Brasília) e faz TRÊS coisas
@@ -662,3 +663,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ ok: false, error: err.message, partial: response });
   }
 }
+ 
