@@ -62,9 +62,17 @@ const EVOLUTION_TOKEN    = process.env.EVOLUTION_TOKEN    || "251AE7F1D35-423F-B
 
 function normalizePhoneForSend(raw) {
   if (!raw) return null;
-  const digits = String(raw).replace(/\D/g, "");
-  if (digits.startsWith("55") && digits.length >= 12) return digits;
-  if (digits.length === 11 || digits.length === 10) return "55" + digits;
+  let digits = String(raw).replace(/\D/g, "");
+
+  // Garante prefixo 55 (Brasil)
+  if (!digits.startsWith("55")) digits = "55" + digits;
+
+  // Números brasileiros: 55 + DDD (2) + número (8 ou 9 dígitos)
+  // Se tiver 55 + DDD + 8 dígitos (sem o 9), adiciona o 9
+  if (digits.length === 12) {
+    digits = digits.slice(0, 4) + "9" + digits.slice(4);
+  }
+
   return digits;
 }
 
