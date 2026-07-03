@@ -1130,7 +1130,7 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
       } catch (err) {
         console.error("Erro ao enviar proposta imediata:", err);
       }
-    }, 30000);
+    }, 10000);
   }
 
   if (result.saveSupplierCategory) {
