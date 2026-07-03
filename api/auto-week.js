@@ -1,21 +1,19 @@
 // /api/auto-week.js
 //
-// Cron que roda todo dia às 10h UTC (07h Brasília) e faz DUAS coisas
+// Cron que roda todo dia às 10h UTC (07h Brasília) e faz TRÊS coisas
 // independentes (pra não precisar de um segundo arquivo em api/, já que o
 // plano Hobby da Vercel limita a 12 Serverless Functions):
 //
-// 1) INSTAGRAM — verifica se é hora de preparar a próxima semana de posts:
-//      - Busca o post agendado com a data mais distante no futuro
-//      - Se essa data estiver a 1 dia ou menos de hoje (ou não houver
-//        nenhum post agendado), gera 7 legendas + 7 criativos via IA e
-//        salva como "aguardando_aprovacao" (não agenda no Buffer ainda)
-//
-// 2) FOLLOW-UP — verifica contatos do CRM com follow-up atrasado (regras em
+// 1) FOLLOW-UP — verifica contatos do CRM com follow-up atrasado (regras em
 //      src/crm/followUp.js: Lead 2 dias, Proposta 3 dias, Contrato 7 dias)
-//      e manda uma mensagem automática de WhatsApp. Pra não ficar
-//      insistindo pra sempre com quem nunca responde, para depois de
-//      MAX_AUTO_FOLLOWUPS tentativas e deixa aparecer na lista de
-//      "Follow-up pendente" da Home pra alguém decidir na mão.
+//      e manda uma mensagem automática de WhatsApp.
+//
+// 2) PROPOSTAS — verifica orçamentos salvos com propostaEnviada: false há
+//      mais de 4 minutos e envia o PDF de proposta correspondente via WhatsApp.
+//      (O setTimeout dentro do whatsapp-webhook.js tem timeout de 60s no Vercel
+//      Hobby, então o envio é delegado para este cron que não tem esse limite.)
+//
+// 3) INSTAGRAM — verifica se é hora de preparar a próxima semana de posts.
 //
 // Segurança: a Vercel envia Authorization: Bearer {CRON_SECRET}. Qualquer
 // chamada sem esse header recebe 401.
@@ -46,6 +44,151 @@ import {
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
 import { needsFollowUp, buildFollowUpMessage } from "../src/crm/followUp.js";
+
+// URLs dos PDFs de proposta (mesmas variáveis do whatsapp-webhook.js)
+const PDF_PROPOSTAS = {
+  portaria_24h:        process.env.PDF_PORTARIA_24H        || "",
+  portaria_12h:        process.env.PDF_PORTARIA_12H        || "",
+  limpeza_8h_sexta:    process.env.PDF_LIMPEZA_8H_SEXTA    || "",
+  limpeza_8h_sabado:   process.env.PDF_LIMPEZA_8H_SABADO   || "",
+  limpeza_4h_sabado:   process.env.PDF_LIMPEZA_4H_SABADO   || "",
+  limpeza_4h_sexta:    process.env.PDF_LIMPEZA_4H_SEXTA    || "",
+  zeladoria_8h_sabado: process.env.PDF_ZELADORIA_8H_SABADO || "",
+};
+
+const EVOLUTION_BASE_URL = process.env.EVOLUTION_BASE_URL || "https://evolution-api-production-7c15.up.railway.app";
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "lcs_crm";
+const EVOLUTION_TOKEN    = process.env.EVOLUTION_TOKEN    || "251AE7F1D35-423F-BD4A-5E79555F1521";
+
+function normalizePhoneForSend(raw) {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D/g, "");
+  if (digits.startsWith("55") && digits.length >= 12) return digits;
+  if (digits.length === 11 || digits.length === 10) return "55" + digits;
+  return digits;
+}
+
+async function sendTextProposta(toPhone, text) {
+  const number = normalizePhoneForSend(toPhone);
+  if (!number) return;
+  await fetch(`${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+    body: JSON.stringify({ number, text }),
+  });
+}
+
+async function sendDocumentProposta(toPhone, url, fileName, caption) {
+  const number = normalizePhoneForSend(toPhone);
+  if (!number || !url) return;
+  await fetch(`${EVOLUTION_BASE_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+    body: JSON.stringify({ number, mediatype: "document", media: url, fileName, caption: caption || "" }),
+  });
+}
+
+function selecionarPdfProposta(data) {
+  const servico = (data.servico || "").toLowerCase();
+  const carga   = (data.cargaHoraria || "").toLowerCase();
+  const tipo    = (data.tipoPortaria || "").toLowerCase();
+
+  if (servico === "portaria") {
+    if (tipo.includes("24")) return { url: PDF_PROPOSTAS.portaria_24h,        fileName: "Proposta_Portaria_24h_LCS.pdf" };
+    if (tipo.includes("12")) return { url: PDF_PROPOSTAS.portaria_12h,        fileName: "Proposta_Portaria_12h_LCS.pdf" };
+  }
+  if (servico === "limpeza") {
+    const isSabado = carga.includes("sáb") || carga.includes("sab") || carga.includes("44h") || carga.includes("44 h");
+    const is8h = carga.includes("8");
+    const is4h = carga.includes("4");
+    if (is8h && isSabado) return { url: PDF_PROPOSTAS.limpeza_8h_sabado,  fileName: "Proposta_Limpeza_8h_SegSab_LCS.pdf" };
+    if (is8h)             return { url: PDF_PROPOSTAS.limpeza_8h_sexta,   fileName: "Proposta_Limpeza_8h_SegSex_LCS.pdf" };
+    if (is4h && isSabado) return { url: PDF_PROPOSTAS.limpeza_4h_sabado,  fileName: "Proposta_Limpeza_4h_SegSab_LCS.pdf" };
+    if (is4h)             return { url: PDF_PROPOSTAS.limpeza_4h_sexta,   fileName: "Proposta_Limpeza_4h_SegSex_LCS.pdf" };
+  }
+  if (servico === "zeladoria") {
+    return { url: PDF_PROPOSTAS.zeladoria_8h_sabado, fileName: "Proposta_Zeladoria_8h_SegSab_LCS.pdf" };
+  }
+  return null;
+}
+
+async function runPropostaCheck(db) {
+  const DELAY_MS = 4 * 60 * 1000; // 4 minutos
+  const agora = Date.now();
+  const results = [];
+
+  // Busca orçamentos com proposta ainda não enviada
+  const snap = await getDocs(
+    query(collection(db, "orcamentos"), where("propostaEnviada", "==", false))
+  );
+
+  for (const docSnap of snap.docs) {
+    const orc = docSnap.data();
+
+    // Ainda não passaram 4 minutos desde o orçamento
+    const since = orc.propostaPendenteSince || 0;
+    if (agora - since < DELAY_MS) {
+      results.push({ id: docSnap.id, skipped: true, reason: "Ainda no aguardo de 4 min" });
+      continue;
+    }
+
+    try {
+      const phone   = orc.phone;
+      const servico = orc.servico || "serviço";
+      const proposta = selecionarPdfProposta(orc);
+
+      if (proposta && proposta.url) {
+        const msgProposta =
+          `Olá! 😊 Conforme prometido, segue a proposta comercial da *LCS Terceirização* para o serviço de *${servico}*.\n\n` +
+          `📋 Incluído na proposta:\n` +
+          `• Funcionário(s) uniformizado(s)\n` +
+          `• Regime CLT com todos os encargos\n` +
+          `• Troca imediata em caso de falta\n` +
+          `• Supervisão diária\n` +
+          `• Nota Fiscal\n` +
+          `• Todos os documentos e impostos incluídos\n\n` +
+          `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
+          `• CFTV — câmeras de monitoramento\n` +
+          `• Leitores de placa veicular\n` +
+          `• Biometria facial\n` +
+          `_Esses serviços podem ser orçados separadamente conforme sua necessidade._\n\n` +
+          `Qualquer dúvida ou ajuste, é só nos chamar! 🤝\n` +
+          `📞 (51) 3058-6391 / 99889-3033`;
+
+        await sendTextProposta(phone, msgProposta);
+        await sendDocumentProposta(phone, proposta.url, proposta.fileName, "📄 Proposta Comercial LCS Terceirização");
+      } else {
+        // Sem PDF específico — mensagem genérica
+        const msgGenerica =
+          `Olá! 😊 Estamos finalizando o orçamento personalizado para o serviço de *${servico}* solicitado.\n\n` +
+          `Em breve nossa equipe entrará em contato com todos os detalhes e valores. ⏳\n\n` +
+          `🔒 Além disso, trabalhamos com:\n` +
+          `• CFTV — câmeras de monitoramento\n` +
+          `• Leitores de placa veicular\n` +
+          `• Biometria facial\n` +
+          `_Esses serviços podem ser orçados separadamente._\n\n` +
+          `Obrigado pela preferência! 🤝\n` +
+          `📞 (51) 3058-6391 / 99889-3033`;
+
+        await sendTextProposta(phone, msgGenerica);
+      }
+
+      // Marca como enviada
+      await updateDoc(doc(db, "orcamentos", docSnap.id), {
+        propostaEnviada: true,
+        propostaEnviadaEm: serverTimestamp(),
+      });
+
+      results.push({ id: docSnap.id, phone, ok: true });
+      console.log(`[auto-week/proposta] ✅ Proposta enviada para ${phone}`);
+    } catch (err) {
+      console.error(`[auto-week/proposta] ❌ ${docSnap.id}: ${err.message}`);
+      results.push({ id: docSnap.id, ok: false, error: err.message });
+    }
+  }
+
+  return results;
+}
 
 const firebaseConfig = {
   apiKey: "AIzaSyAHOwdtTpZXVr_BNwG5x54gfEfD3PHSCVk",
@@ -433,7 +576,19 @@ export default async function handler(req, res) {
       response.followUp = { error: followUpErr.message };
     }
 
-    // 2) Instagram — verifica se é hora de gerar (pode ser ignorado com ?force=true)
+    // 2) Propostas pendentes — envia PDF de orçamento para quem completou o fluxo há mais de 4 min
+    try {
+      const propostaResults = await runPropostaCheck(db);
+      response.propostas = {
+        enviadas: propostaResults.filter((r) => r.ok).length,
+        results: propostaResults,
+      };
+    } catch (propostaErr) {
+      console.error("[auto-week/proposta] Erro fatal:", propostaErr);
+      response.propostas = { error: propostaErr.message };
+    }
+
+    // 3) Instagram — verifica se é hora de gerar (pode ser ignorado com ?force=true)
     const force = req.query?.force === "true";
 
     if (!force) {

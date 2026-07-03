@@ -670,6 +670,25 @@ function handleOrcamentoMenu(incoming) {
   if (incoming === "0") {
     return { replies: [mainMenuMessage()], newState: emptyState() };
   }
+
+  // Se pedir email
+  const incomingLower = incoming.toLowerCase();
+  if (
+    incomingLower.includes("email") ||
+    incomingLower.includes("e-mail") ||
+    incomingLower.includes("manda no email") ||
+    incomingLower.includes("enviar por email")
+  ) {
+    return {
+      replies: [
+        "Claro! 📧 Você pode enviar sua solicitação de orçamento diretamente para o nosso e-mail:\n\n" +
+        "*lcs@lcsterceirizacao.com.br*\n\n" +
+        "Nossa equipe retornará em breve com todos os detalhes. 😊",
+      ],
+      newState: emptyState(),
+    };
+  }
+
   const servico = SERVICOS_ORCAMENTO[incoming];
   if (!servico) {
     return { replies: ["Não entendi 🤔\n\n" + ORCAMENTO_MENU_TEXT], newState: { menu: "orcamento", step: 0, data: {} } };
@@ -685,6 +704,27 @@ function handleOrcamentoMenu(incoming) {
 function handleOrcamentoFluxo(incoming, state) {
   const data = { ...state.data };
   const servico = data.servico;
+
+  // Se o cliente pedir envio por email em qualquer etapa do fluxo
+  const incomingLower = incoming.toLowerCase();
+  if (
+    incomingLower.includes("email") ||
+    incomingLower.includes("e-mail") ||
+    incomingLower.includes("correio") ||
+    incomingLower.includes("mandar por email") ||
+    incomingLower.includes("enviar por email") ||
+    incomingLower.includes("manda no email")
+  ) {
+    return {
+      replies: [
+        "Claro! 📧 Você pode enviar sua solicitação de orçamento diretamente para o nosso e-mail:\n\n" +
+        "*lcs@lcsterceirizacao.com.br*\n\n" +
+        "Nossa equipe retornará em breve com todos os detalhes. 😊\n\n" +
+        "Se preferir continuar aqui pelo WhatsApp, é só me dizer o serviço desejado!",
+      ],
+      newState: emptyState(),
+    };
+  }
 
   if (state.step === 1) {
     const tipo = TIPOS_PORTARIA[incoming];
@@ -1084,6 +1124,8 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
       phone,
       pushName: pushName || "",
       ...result.saveQuote,
+      propostaEnviada: false,
+      propostaPendenteSince: Date.now(),
       createdAt: serverTimestamp(),
     });
     await upsertContactFromBot(db, phone, pushName, "lead", { service: result.saveQuote.servico });
@@ -1094,11 +1136,6 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
     } catch (notifyErr) {
       console.error("Erro ao notificar especialista sobre o orçamento:", notifyErr);
     }
-
-    // Agenda envio da proposta PDF específica após 4 minutos (não bloqueia)
-    agendarEnvioProposta({ phone, data: result.saveQuote }).catch((err) =>
-      console.error("Erro no agendamento da proposta:", err)
-    );
   }
 
   if (result.saveSupplierCategory) {
