@@ -42,6 +42,7 @@ import {
   setDoc,
   updateDoc,
   increment,
+  runTransaction,
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
 import { needsFollowUp, buildFollowUpMessage } from "../src/crm/followUp.js";
@@ -132,6 +133,34 @@ function selecionarPdfProposta(data) {
   return null;
 }
 
+// Tenta "reservar" o orçamento antes de processar, usando uma transação
+// atômica do Firestore. Isso evita que dois disparos simultâneos (ex: o
+// cron automático do cron-job.org rodando ao mesmo tempo que uma chamada
+// manual de teste) processem e enviem o mesmo orçamento duas vezes.
+async function claimOrcamento(db, docId) {
+  const LOCK_TTL_MS = 2 * 60 * 1000; // 2 minutos — tempo máximo que um lock é considerado válido
+  const ref = doc(db, "orcamentos", docId);
+  try {
+    return await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return false;
+      const data = snap.data();
+
+      if (data.propostaEnviada === true) return false; // já foi enviado de verdade
+
+      const now = Date.now();
+      const lockedAt = Number(data.propostaLockedAt) || 0;
+      if (lockedAt && now - lockedAt < LOCK_TTL_MS) return false; // outro processo já está cuidando disso agora
+
+      tx.update(ref, { propostaLockedAt: now });
+      return true;
+    });
+  } catch (err) {
+    console.error(`[auto-week/proposta] Erro ao travar ${docId}:`, err.message);
+    return false;
+  }
+}
+
 async function runPropostaCheck(db) {
   const DELAY_MS = 5 * 60 * 1000; // 5 minutos
   const agora = Date.now();
@@ -157,6 +186,14 @@ async function runPropostaCheck(db) {
 
     if (since > 0 && agora - since < DELAY_MS) {
       results.push({ id: docSnap.id, skipped: true, reason: `Aguardando ${Math.round((DELAY_MS - (agora - since)) / 1000)}s` });
+      continue;
+    }
+
+    // Trava o orçamento antes de mandar qualquer mensagem — se outro
+    // disparo já pegou esse mesmo registro nos últimos 2 minutos, pula.
+    const claimed = await claimOrcamento(db, docSnap.id);
+    if (!claimed) {
+      results.push({ id: docSnap.id, skipped: true, reason: "Já enviado ou sendo processado por outro disparo (lock ativo)" });
       continue;
     }
 
@@ -195,6 +232,9 @@ async function runPropostaCheck(db) {
     } catch (err) {
       console.error(`[auto-week/proposta] ❌ ${docSnap.id}: ${err.message}`);
       results.push({ id: docSnap.id, ok: false, error: err.message });
+      // Não desfazemos o lock aqui de propósito: ele expira sozinho em 2 minutos
+      // (LOCK_TTL_MS), o que dá tempo suficiente pra não colidir com o próximo
+      // disparo automático, mas ainda permite nova tentativa em breve.
     }
   }
 
