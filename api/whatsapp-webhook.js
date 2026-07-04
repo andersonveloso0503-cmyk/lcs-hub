@@ -579,6 +579,30 @@ function processMessage({ text, pushName, state }) {
     return { replies: [mainMenuMessage(pushName)], newState: emptyState() };
   }
 
+  // Detecção de reclamação sobre proposta enviada
+  const incomingLower = incoming.toLowerCase();
+  const reclamacaoProposta = [
+    "proposta errada", "errada", "incorreta", "não é isso",
+    "nao e isso", "não é esse", "nao e esse", "errado",
+    "não era isso", "nao era isso", "proposta incorreta",
+    "essa não", "essa nao", "não quero isso", "nao quero isso",
+    "proposta diferente", "outra proposta",
+  ].some(p => incomingLower.includes(p));
+
+  if (reclamacaoProposta) {
+    const nome = pushName ? pushName.split(" ")[0] : "";
+    return {
+      replies: [
+        `Oi${nome ? " " + nome : ""}! 😔 Pedimos desculpas pela proposta incorreta!\n\n` +
+        `Vamos elaborar uma nova proposta adequada para a sua necessidade e em breve estaremos enviando. ⏳\n\n` +
+        `Se preferir, pode nos informar aqui o que precisa ser ajustado, ou entrar em contato diretamente:\n` +
+        `📞 (51) 3058-6391 / 99889-3033\n` +
+        `📧 lcs@lcsterceirizacao.com.br`
+      ],
+      newState: emptyState(),
+    };
+  }
+
   switch (current.menu) {
     case "funcionario":
       return handleFuncionarioMenu(incoming);
@@ -1097,35 +1121,14 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
       console.error("Erro ao notificar especialista sobre o orçamento:", notifyErr);
     }
 
-    // Envia mensagem + PDF da proposta diretamente (sem delay)
+    // Envia mensagem descontraída — o PDF será enviado pelo cron em ~5 minutos
     try {
       const nome = pushName ? pushName.split(" ")[0] : "";
-      const proposta = selecionarPdfProposta(result.saveQuote);
-
       await sendText(phone,
         `Peraê${nome ? " " + nome : ""}... 🤔💭 já estou elaborando a proposta aqui, me dá um tempinho!`
       );
-
-      if (proposta && proposta.url) {
-        await sendDocumentFromUrl(phone, proposta.url, proposta.fileName,
-          `Pronto! 🎉 Segue a proposta comercial da *LCS Terceirização*!`
-        );
-      } else {
-        await sendText(phone,
-          `Pronto! 😊 Nossa equipe já está finalizando os detalhes e entrará em contato em breve! 🤝\n\n` +
-          `📞 (51) 3058-6391 / 99889-3033`
-        );
-      }
-
-      await sendText(phone,
-        `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
-        `• 📹 CFTV — câmeras de monitoramento\n` +
-        `• 🚗 Leitores de placa veicular\n` +
-        `• 👤 Biometria facial\n\n` +
-        `_Esses serviços podem ser orçados separadamente. Qualquer dúvida é só chamar!_ 😊`
-      );
     } catch (err) {
-      console.error("Erro ao enviar proposta:", err);
+      console.error("Erro ao enviar mensagem de elaboração:", err);
     }
   }
 

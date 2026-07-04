@@ -122,7 +122,7 @@ function selecionarPdfProposta(data) {
 }
 
 async function runPropostaCheck(db) {
-  const DELAY_MS = 4 * 60 * 1000; // 4 minutos
+  const DELAY_MS = 5 * 60 * 1000; // 5 minutos
   const agora = Date.now();
   const results = [];
 
@@ -134,10 +134,18 @@ async function runPropostaCheck(db) {
   for (const docSnap of snap.docs) {
     const orc = docSnap.data();
 
-    // Ainda não passaram 4 minutos desde o orçamento
-    const since = orc.propostaPendenteSince || 0;
-    if (agora - since < DELAY_MS) {
-      results.push({ id: docSnap.id, skipped: true, reason: "Ainda no aguardo de 4 min" });
+    // Usa createdAt (Timestamp do Firestore) para calcular o tempo decorrido
+    // O propostaPendenteSince é int64 e não funciona bem com Date.now()
+    let since = 0;
+    if (orc.createdAt && typeof orc.createdAt.toMillis === "function") {
+      since = orc.createdAt.toMillis();
+    } else if (orc.propostaPendenteSince) {
+      // Fallback: tenta usar propostaPendenteSince como número
+      since = Number(orc.propostaPendenteSince) || 0;
+    }
+
+    if (since > 0 && agora - since < DELAY_MS) {
+      results.push({ id: docSnap.id, skipped: true, reason: `Aguardando ${Math.round((DELAY_MS - (agora - since)) / 1000)}s` });
       continue;
     }
 
@@ -147,39 +155,22 @@ async function runPropostaCheck(db) {
       const proposta = selecionarPdfProposta(orc);
 
       if (proposta && proposta.url) {
-        const msgProposta =
-          `Olá! 😊 Conforme prometido, segue a proposta comercial da *LCS Terceirização* para o serviço de *${servico}*.\n\n` +
-          `📋 Incluído na proposta:\n` +
-          `• Funcionário(s) uniformizado(s)\n` +
-          `• Regime CLT com todos os encargos\n` +
-          `• Troca imediata em caso de falta\n` +
-          `• Supervisão diária\n` +
-          `• Nota Fiscal\n` +
-          `• Todos os documentos e impostos incluídos\n\n` +
+        await sendDocumentProposta(phone, proposta.url, proposta.fileName,
+          `Pronto! 🎉 Segue a proposta comercial da *LCS Terceirização*!`
+        );
+        await sendTextProposta(phone,
           `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
-          `• CFTV — câmeras de monitoramento\n` +
-          `• Leitores de placa veicular\n` +
-          `• Biometria facial\n` +
-          `_Esses serviços podem ser orçados separadamente conforme sua necessidade._\n\n` +
-          `Qualquer dúvida ou ajuste, é só nos chamar! 🤝\n` +
-          `📞 (51) 3058-6391 / 99889-3033`;
-
-        await sendTextProposta(phone, msgProposta);
-        await sendDocumentProposta(phone, proposta.url, proposta.fileName, "📄 Proposta Comercial LCS Terceirização");
+          `• 📹 CFTV — câmeras de monitoramento\n` +
+          `• 🚗 Leitores de placa veicular\n` +
+          `• 👤 Biometria facial\n\n` +
+          `_Esses serviços podem ser orçados separadamente. Qualquer dúvida é só chamar!_ 😊`
+        );
       } else {
-        // Sem PDF específico — mensagem genérica
-        const msgGenerica =
-          `Olá! 😊 Estamos finalizando o orçamento personalizado para o serviço de *${servico}* solicitado.\n\n` +
-          `Em breve nossa equipe entrará em contato com todos os detalhes e valores. ⏳\n\n` +
-          `🔒 Além disso, trabalhamos com:\n` +
-          `• CFTV — câmeras de monitoramento\n` +
-          `• Leitores de placa veicular\n` +
-          `• Biometria facial\n` +
-          `_Esses serviços podem ser orçados separadamente._\n\n` +
-          `Obrigado pela preferência! 🤝\n` +
-          `📞 (51) 3058-6391 / 99889-3033`;
-
-        await sendTextProposta(phone, msgGenerica);
+        const servico = orc.servico || "serviço";
+        await sendTextProposta(phone,
+          `Olá! 😊 Nossa equipe está finalizando o orçamento para *${servico}* e entrará em contato em breve.\n\n` +
+          `📞 (51) 3058-6391 / 99889-3033`
+        );
       }
 
       // Marca como enviada
