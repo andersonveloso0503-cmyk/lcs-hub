@@ -489,8 +489,15 @@ async function sendFollowUpWhatsApp(phone, text) {
     headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
     body: JSON.stringify({ number, text }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.message || "Erro ao enviar via Evolution API");
+  const raw = await res.text();
+  let data;
+  try { data = JSON.parse(raw); } catch { data = null; }
+  if (!res.ok) {
+    console.error(`[auto-week/followup] Evolution API respondeu status ${res.status} para ${number}:`, raw);
+    throw new Error(
+      `Evolution API status ${res.status}: ${data?.message || raw?.slice(0, 200) || "sem corpo de resposta"}`
+    );
+  }
   return data;
 }
 
