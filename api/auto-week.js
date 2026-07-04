@@ -79,22 +79,33 @@ function normalizePhoneForSend(raw) {
 
 async function sendTextProposta(toPhone, text) {
   const number = normalizePhoneForSend(toPhone);
-  if (!number) return;
-  await fetch(`${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
+  if (!number) throw new Error("Telefone inválido/ausente para envio de texto");
+  const res = await fetch(`${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
     body: JSON.stringify({ number, text }),
   });
+  const raw = await res.text();
+  if (!res.ok) {
+    console.error(`[auto-week/proposta] sendText falhou (${res.status}) para ${number}:`, raw);
+    throw new Error(`Evolution API sendText status ${res.status}: ${raw?.slice(0, 200)}`);
+  }
 }
 
 async function sendDocumentProposta(toPhone, url, fileName, caption) {
   const number = normalizePhoneForSend(toPhone);
-  if (!number || !url) return;
-  await fetch(`${EVOLUTION_BASE_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+  if (!number) throw new Error("Telefone inválido/ausente para envio de documento");
+  if (!url) throw new Error(`URL do PDF vazia/não configurada para ${fileName || "arquivo desconhecido"} — confira a env var correspondente no Vercel`);
+  const res = await fetch(`${EVOLUTION_BASE_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
     body: JSON.stringify({ number, mediatype: "document", media: url, fileName, caption: caption || "" }),
   });
+  const raw = await res.text();
+  if (!res.ok) {
+    console.error(`[auto-week/proposta] sendMedia falhou (${res.status}) para ${number}:`, raw);
+    throw new Error(`Evolution API sendMedia status ${res.status}: ${raw?.slice(0, 200)}`);
+  }
 }
 
 function selecionarPdfProposta(data) {
