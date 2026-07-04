@@ -59,7 +59,7 @@ const PDF_PROPOSTAS = {
 
 const EVOLUTION_BASE_URL = process.env.EVOLUTION_BASE_URL || "https://evolution-api-production-7c15.up.railway.app";
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "lcs_crm";
-const EVOLUTION_TOKEN    = process.env.EVOLUTION_TOKEN    || "251AE7F1D35-423F-BD4A-5E79555F1521";
+const EVOLUTION_TOKEN    = process.env.EVOLUTION_TOKEN    || "833e1efbd3e377537bf10ce7aa61120401d1e420bea7dbd7698b6ca1904379de";
 
 function normalizePhoneForSend(raw) {
   if (!raw) return null;
@@ -482,6 +482,17 @@ function normalizePhoneForFollowUp(raw) {
   return digits;
 }
 
+function isValidPhoneForWhatsApp(raw) {
+  if (!raw) return false;
+  const digits = String(raw).replace(/\D/g, "");
+  // IDs de grupo do WhatsApp começam com "120363" e têm muito mais dígitos
+  // que um telefone real — nunca devem ser tratados como número de contato.
+  if (digits.startsWith("120363")) return false;
+  // Telefone brasileiro válido: 55 + DDD (2) + número (8 ou 9) = 12 a 13 dígitos.
+  // Sem o 55: 10 a 11 dígitos.
+  return digits.length >= 10 && digits.length <= 13;
+}
+
 async function sendFollowUpWhatsApp(phone, text) {
   const number = normalizePhoneForFollowUp(phone);
   const res = await fetch(`${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
@@ -493,9 +504,9 @@ async function sendFollowUpWhatsApp(phone, text) {
   let data;
   try { data = JSON.parse(raw); } catch { data = null; }
   if (!res.ok) {
-    console.error(`[auto-week/followup] Evolution API respondeu status ${res.status} para ${number}:`, raw);
+    console.error(`[auto-week/followup] Evolution API status ${res.status} | telefone original: ${JSON.stringify(phone)} | número normalizado: ${JSON.stringify(number)} | resposta:`, raw);
     throw new Error(
-      `Evolution API status ${res.status}: ${data?.message || raw?.slice(0, 200) || "sem corpo de resposta"}`
+      `Evolution API status ${res.status} (telefone original: ${phone}, normalizado: ${number}): ${data?.message || raw?.slice(0, 200) || "sem corpo de resposta"}`
     );
   }
   return data;
@@ -513,6 +524,10 @@ async function runFollowUpCheck(db) {
 
   const pending = contacts.filter((c) => {
     if ((c.autoFollowUpCount || 0) >= MAX_AUTO_FOLLOWUPS) return false;
+    if (!isValidPhoneForWhatsApp(c.whatsapp)) {
+      console.warn(`[auto-week/followup] ⚠️ Pulando ${c.name || c.id} — whatsapp inválido: ${JSON.stringify(c.whatsapp)}`);
+      return false;
+    }
     return needsFollowUp(c);
   });
 
