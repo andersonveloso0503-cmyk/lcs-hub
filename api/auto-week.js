@@ -545,8 +545,16 @@ async function runFollowUpCheck(db) {
 // ── Handler principal ─────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  const authHeader = req.headers.authorization;
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
+
+  const authHeader = (req.headers.authorization || "").trim();
+  const querySecret = (req.query?.secret || "").toString().trim();
+
+  const headerOk = CRON_SECRET && authHeader === `Bearer ${CRON_SECRET}`;
+  const queryOk = CRON_SECRET && querySecret === CRON_SECRET;
+
+  if (!headerOk && !queryOk) {
+    console.log("[auto-week/auth] FALHOU. Header recebido:", JSON.stringify(authHeader), "| Query recebida:", JSON.stringify(querySecret), "| CRON_SECRET configurado?", CRON_SECRET ? "sim (" + CRON_SECRET.length + " chars)" : "NÃO — env var vazia/ausente");
     return res.status(401).json({ error: "Não autorizado" });
   }
 
