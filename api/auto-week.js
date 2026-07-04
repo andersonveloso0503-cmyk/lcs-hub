@@ -137,7 +137,7 @@ function selecionarPdfProposta(data) {
 // atômica do Firestore. Isso evita que dois disparos simultâneos (ex: o
 // cron automático do cron-job.org rodando ao mesmo tempo que uma chamada
 // manual de teste) processem e enviem o mesmo orçamento duas vezes.
-async function claimOrcamento(db, docId) {
+async function claimOrcamento(db, docId, lockField = "propostaLockedAt") {
   const LOCK_TTL_MS = 2 * 60 * 1000; // 2 minutos — tempo máximo que um lock é considerado válido
   const ref = doc(db, "orcamentos", docId);
   try {
@@ -146,22 +146,105 @@ async function claimOrcamento(db, docId) {
       if (!snap.exists()) return false;
       const data = snap.data();
 
-      if (data.propostaEnviada === true) return false; // já foi enviado de verdade
-
       const now = Date.now();
-      const lockedAt = Number(data.propostaLockedAt) || 0;
+      const lockedAt = Number(data[lockField]) || 0;
       if (lockedAt && now - lockedAt < LOCK_TTL_MS) return false; // outro processo já está cuidando disso agora
 
-      tx.update(ref, { propostaLockedAt: now });
+      tx.update(ref, { [lockField]: now });
       return true;
     });
   } catch (err) {
-    console.error(`[auto-week/proposta] Erro ao travar ${docId}:`, err.message);
+    console.error(`[auto-week/proposta] Erro ao travar ${docId} (${lockField}):`, err.message);
     return false;
   }
 }
 
-async function runPropostaCheck(db) {
+const MENSAGEM_DUVIDA_PROPOSTA =
+  `Ficou com alguma dúvida sobre a proposta? Gostaria de falar com um especialista? 😊\n\n` +
+  `Responde *sim* ou *não* que eu já te ajudo!`;
+
+/**
+ * Verifica orçamentos com proposta já enviada e ainda sem resposta do
+ * cliente, mandando a pergunta de check-in em duas ondas:
+ *   1) 1 hora depois do envio da proposta (primeira tentativa)
+ *   2) 2 dias depois da primeira tentativa, se ainda não respondeu
+ *
+ * O campo `ultimaMensagemClienteEm` deve ser atualizado pelo
+ * whatsapp-webhook.js sempre que uma mensagem do cliente chegar — é assim
+ * que sabemos se ele respondeu ou não desde a proposta. Se esse campo for
+ * mais recente que o envio do check-in, consideramos que ele já respondeu
+ * (a interpretação da resposta — sim/não/especialista — é feita no
+ * whatsapp-webhook.js, não aqui).
+ */
+async function runDuvidaCheck(db) {
+  const UMA_HORA_MS = 60 * 60 * 1000;
+  const DOIS_DIAS_MS = 2 * 24 * 60 * 60 * 1000;
+  const agora = Date.now();
+  const results = [];
+
+  const snap = await getDocs(
+    query(collection(db, "orcamentos"), where("propostaEnviada", "==", true))
+  );
+
+  for (const docSnap of snap.docs) {
+    const orc = docSnap.data();
+
+    // Já foi encaminhado pro especialista ou já foi encerrado (cliente disse "não")
+    if (orc.encaminhadoEspecialista === true || orc.duvidaEncerrada === true) continue;
+
+    const propostaEnviadaEm = orc.propostaEnviadaEm?.toMillis?.() || 0;
+    if (!propostaEnviadaEm) continue;
+
+    const ultimaMsgCliente = orc.ultimaMensagemClienteEm?.toMillis?.() || 0;
+    const respondeuDepoisDaProposta = ultimaMsgCliente > propostaEnviadaEm;
+
+    // Se o cliente já respondeu por conta própria depois da proposta,
+    // não mandamos nenhum check-in automático — deixa o webhook cuidar da resposta.
+    if (respondeuDepoisDaProposta) continue;
+
+    const duvidaCheck1EnviadoEm = orc.duvidaCheck1EnviadoEm?.toMillis?.() || 0;
+    const duvidaCheck2EnviadoEm = orc.duvidaCheck2EnviadoEm?.toMillis?.() || 0;
+
+    try {
+      if (!duvidaCheck1EnviadoEm) {
+        // Primeira tentativa: 1h depois da proposta
+        if (agora - propostaEnviadaEm < UMA_HORA_MS) {
+          results.push({ id: docSnap.id, skipped: true, reason: "Aguardando 1h desde a proposta" });
+          continue;
+        }
+        const claimed = await claimOrcamento(db, docSnap.id, "duvidaCheck1LockedAt");
+        if (!claimed) { results.push({ id: docSnap.id, skipped: true, reason: "Lock ativo (check-in 1)" }); continue; }
+
+        await sendTextProposta(orc.phone, MENSAGEM_DUVIDA_PROPOSTA);
+        await updateDoc(doc(db, "orcamentos", docSnap.id), { duvidaCheck1EnviadoEm: serverTimestamp() });
+        results.push({ id: docSnap.id, ok: true, etapa: "check-in 1 (1h)" });
+        console.log(`[auto-week/duvida] ✅ Check-in 1 enviado para ${orc.phone}`);
+      } else if (!duvidaCheck2EnviadoEm) {
+        // Segunda tentativa: 2 dias depois do primeiro check-in
+        if (agora - duvidaCheck1EnviadoEm < DOIS_DIAS_MS) {
+          results.push({ id: docSnap.id, skipped: true, reason: "Aguardando 2 dias desde o check-in 1" });
+          continue;
+        }
+        const claimed = await claimOrcamento(db, docSnap.id, "duvidaCheck2LockedAt");
+        if (!claimed) { results.push({ id: docSnap.id, skipped: true, reason: "Lock ativo (check-in 2)" }); continue; }
+
+        await sendTextProposta(orc.phone, MENSAGEM_DUVIDA_PROPOSTA);
+        await updateDoc(doc(db, "orcamentos", docSnap.id), { duvidaCheck2EnviadoEm: serverTimestamp() });
+        results.push({ id: docSnap.id, ok: true, etapa: "check-in 2 (2 dias)" });
+        console.log(`[auto-week/duvida] ✅ Check-in 2 enviado para ${orc.phone}`);
+      }
+      // Se já mandou os dois check-ins e ainda assim não respondeu, paramos por aqui
+      // — fica pendente pra alguém decidir na mão (mesmo espírito do follow-up de CRM).
+    } catch (err) {
+      console.error(`[auto-week/duvida] ❌ ${docSnap.id}: ${err.message}`);
+      results.push({ id: docSnap.id, ok: false, error: err.message });
+    }
+  }
+
+  return results;
+}
+
+
   const DELAY_MS = 5 * 60 * 1000; // 5 minutos
   const agora = Date.now();
   const results = [];
@@ -661,6 +744,19 @@ export default async function handler(req, res) {
     } catch (propostaErr) {
       console.error("[auto-week/proposta] Erro fatal:", propostaErr);
       response.propostas = { error: propostaErr.message };
+    }
+
+    // 2.5) Check-in de dúvida — pergunta se o cliente ficou com dúvida sobre
+    // a proposta (1h depois, e de novo 2 dias depois se ainda não respondeu)
+    try {
+      const duvidaResults = await runDuvidaCheck(db);
+      response.duvidaCheck = {
+        enviados: duvidaResults.filter((r) => r.ok).length,
+        results: duvidaResults,
+      };
+    } catch (duvidaErr) {
+      console.error("[auto-week/duvida] Erro fatal:", duvidaErr);
+      response.duvidaCheck = { error: duvidaErr.message };
     }
 
     // 3) Instagram — verifica se é hora de gerar (pode ser ignorado com ?force=true)

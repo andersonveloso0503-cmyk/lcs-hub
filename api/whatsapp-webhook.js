@@ -28,6 +28,8 @@ import {
   serverTimestamp,
   query,
   where,
+  orderBy,
+  limit,
   getDocs,
   updateDoc,
   doc,
@@ -52,7 +54,7 @@ const EVOLUTION_BASE_URL =
   process.env.EVOLUTION_BASE_URL ||
   "https://evolution-api-production-7c15.up.railway.app";
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "lcs_crm";
-const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || "251EAE7F1D35-423F-BD4A-5E79555F1521";
+const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || "833e1efbd3e377537bf10ce7aa61120401d1e420bea7dbd7698b6ca1904379de";
 
 // URL pública (Vercel Blob) do PDF de apresentação da empresa, enviado
 // automaticamente ao final do fluxo de orçamento.
@@ -1027,7 +1029,141 @@ async function upsertContactFromBot(db, phone, pushName, status, extraFields = {
   await updateDoc(doc(db, "contacts", existing.id), updates);
 }
 
-async function runBotFlow({ db, phone, pushName, messageDoc }) {
+// ── Check-in de dúvida pós-proposta ───────────────────────────────────────────
+//
+// Depois que a proposta é enviada (pelo cron em auto-week.js), o mesmo cron
+// manda uma pergunta de check-in ("ficou com dúvida? sim ou não?") 1h depois,
+// e de novo 2 dias depois se não teve resposta. Este bloco cuida de:
+//   1) Marcar `ultimaMensagemClienteEm` sempre que o cliente escrever algo
+//      depois da proposta — é assim que o cron sabe que ele já respondeu e
+//      para de mandar check-ins repetidos.
+//   2) Interpretar a resposta quando ela vier logo depois de um check-in:
+//      "sim"/"gostei"/"quero fechar"/etc → encaminha pro especialista.
+//      "não"/"nao"/etc → agradece e encerra o acompanhamento automático.
+
+const PALAVRAS_DUVIDA_POSITIVA = [
+  "sim", "s", "quero", "gostei", "fechar", "fecha", "contrato",
+  "especialista", "falar com", "interessad", "vamos", "bora", "topo",
+  "pode ser", "quero sim", "com certeza", "manda",
+];
+const PALAVRAS_DUVIDA_NEGATIVA = [
+  "não", "nao", "n ", " n", "^n$", "obrigado mas", "obrigada mas",
+  "não quero", "nao quero", "não por enquanto", "nao por enquanto",
+  "não, obrigado", "nao, obrigado", "não precisa", "nao precisa",
+];
+
+function normalizarTexto(t) {
+  return (t || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .trim();
+}
+
+function classificarRespostaDuvida(textoCliente) {
+  const t = normalizarTexto(textoCliente);
+  if (!t) return "ambigua";
+
+  // Negativa tem prioridade — frases como "não, obrigado" também contêm
+  // palavras que poderiam soar positivas em outro contexto.
+  const negativaMatch = PALAVRAS_DUVIDA_NEGATIVA.some((p) => {
+    const pn = normalizarTexto(p);
+    return t === pn || t.startsWith(pn) || t.includes(` ${pn} `) || t === "nao" || t === "n";
+  });
+  if (negativaMatch) return "nao";
+
+  const positivaMatch = PALAVRAS_DUVIDA_POSITIVA.some((p) => t.includes(normalizarTexto(p)));
+  if (positivaMatch) return "sim";
+
+  return "ambigua";
+}
+
+/**
+ * Busca o orçamento mais recente do telefone que já teve proposta enviada
+ * e ainda está com o acompanhamento de dúvida em aberto (nem encaminhado
+ * pro especialista, nem encerrado com "não").
+ */
+async function findOrcamentoAbertoParaDuvida(db, phone) {
+  const snap = await getDocs(
+    query(
+      collection(db, "orcamentos"),
+      where("phone", "==", phone),
+      where("propostaEnviada", "==", true),
+      orderBy("createdAt", "desc"),
+      limit(5)
+    )
+  );
+  for (const d of snap.docs) {
+    const data = d.data();
+    if (data.encaminhadoEspecialista === true) continue;
+    if (data.duvidaEncerrada === true) continue;
+    return { id: d.id, ...data };
+  }
+  return null;
+}
+
+/**
+ * Roda para toda mensagem de texto recebida do cliente. Se ele tiver um
+ * orçamento com proposta já enviada e ainda em aberto, marca que ele
+ * respondeu (pra o cron parar de mandar check-in) e, se o check-in já
+ * tiver sido disparado, interpreta a resposta.
+ *
+ * Retorna `true` se a mensagem foi tratada aqui (e portanto o menu normal
+ * do bot não deve rodar também, pra não mandar duas respostas conflitantes).
+ */
+async function handleDuvidaPosProposta({ db, phone, pushName, text }) {
+  const orc = await findOrcamentoAbertoParaDuvida(db, phone);
+  if (!orc) return false;
+
+  // Sempre marca que o cliente respondeu — o cron usa isso pra não mandar
+  // check-in de novo se ele já está engajado na conversa.
+  await updateDoc(doc(db, "orcamentos", orc.id), {
+    ultimaMensagemClienteEm: serverTimestamp(),
+  });
+
+  // Se ainda não mandamos nenhum check-in de dúvida, essa mensagem é só a
+  // continuação normal da conversa — deixa o menu principal do bot cuidar.
+  if (!orc.duvidaCheck1EnviadoEm) return false;
+
+  const classificacao = classificarRespostaDuvida(text);
+
+  if (classificacao === "nao") {
+    await sendText(phone,
+      `Tudo bem! 😊 Agradecemos muito o contato e ficamos à disposição caso mude de ideia. Qualquer coisa, é só chamar!`
+    );
+    await updateDoc(doc(db, "orcamentos", orc.id), {
+      duvidaEncerrada: true,
+      duvidaRespostaEm: serverTimestamp(),
+    });
+    return true;
+  }
+
+  // "sim" ou ambígua: por segurança, preferimos encaminhar pro especialista
+  // a arriscar perder um cliente interessado por causa de uma resposta
+  // que não bateu 100% com o texto esperado.
+  const nome = pushName ? pushName.split(" ")[0] : "";
+  await sendText(phone,
+    `Perfeito${nome ? ", " + nome : ""}! 👍 Vou passar você para o nosso especialista, ele já entra em contato com você por aqui.`
+  );
+  try {
+    await sendText(ESPECIALISTA_WHATSAPP,
+      `📋 *Cliente pediu para falar com especialista*\n\n` +
+      `👤 Nome: ${pushName || "(sem nome)"}\n` +
+      `📱 Telefone: ${phone}\n` +
+      `🧾 Serviço: ${orc.servico || "não informado"}\n` +
+      `💬 Última mensagem: "${text}"`
+    );
+  } catch (notifyErr) {
+    console.error("Erro ao notificar especialista sobre pedido de contato:", notifyErr);
+  }
+  await updateDoc(doc(db, "orcamentos", orc.id), {
+    encaminhadoEspecialista: true,
+    duvidaRespostaEm: serverTimestamp(),
+  });
+  return true;
+}
+
+
   const stateRef = doc(db, "bot_state", phone);
   const stateSnap = await getDoc(stateRef);
   const state = stateSnap.exists() ? stateSnap.data() : null;
@@ -1407,7 +1543,23 @@ export default async function handler(req, res) {
         const botSkipped = BOT_SKIP_STATUSES.includes(currentStatus);
 
         if (!botSkipped) {
-          await runBotFlow({ db, phone, pushName, messageDoc });
+          let tratadoPelaDuvida = false;
+          if (messageDoc.type === "text") {
+            try {
+              tratadoPelaDuvida = await handleDuvidaPosProposta({
+                db,
+                phone,
+                pushName,
+                text: messageDoc.text,
+              });
+            } catch (duvidaErr) {
+              console.error("Erro no check-in de dúvida pós-proposta:", duvidaErr);
+            }
+          }
+
+          if (!tratadoPelaDuvida) {
+            await runBotFlow({ db, phone, pushName, messageDoc });
+          }
         }
       } catch (botErr) {
         console.error("Erro no agente de IA do WhatsApp:", botErr);
