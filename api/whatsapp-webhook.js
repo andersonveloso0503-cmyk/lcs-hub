@@ -1163,7 +1163,7 @@ async function handleDuvidaPosProposta({ db, phone, pushName, text }) {
   return true;
 }
 
-
+async function runBotFlow({ db, phone, pushName, messageDoc }) {
   const stateRef = doc(db, "bot_state", phone);
   const stateSnap = await getDoc(stateRef);
   const state = stateSnap.exists() ? stateSnap.data() : null;
