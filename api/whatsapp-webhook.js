@@ -544,6 +544,8 @@ const TIPO_PORTARIA_PERGUNTA =
 const TIPOS_PORTARIA = { "1": "Portaria 24 horas", "2": "Portaria 12 horas", "3": "Portaria Virtual" };
 
 const CARGA_HORARIA_PERGUNTA = "Qual a carga horária desejada? (ex: 6h, 8h, 12x36, segunda a sábado, etc)";
+const DIAS_SEMANA_PERGUNTA = "Qual o regime de dias?\n\n1 - Segunda a Sexta\n2 - Segunda a Sábado";
+const HORAS_DIA_PERGUNTA = "Quantas horas por dia?\n\n1 - 4 horas\n2 - 8 horas";
 const ENDERECO_PERGUNTA = "Qual o endereço onde o serviço será prestado?";
 const VISITA_TECNICA_PERGUNTA = "Gostaria de agendar uma visita técnica antes do orçamento? (Sim/Não)";
 const INSALUBRIDADE_PERGUNTA = "O serviço inclui limpeza de banheiros ou retirada de lixo? (Sim/Não)";
@@ -705,7 +707,8 @@ function handleOrcamentoMenu(incoming) {
     return { replies: [TIPO_PORTARIA_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 1, data: { servico } } };
   }
 
-  return { replies: [CARGA_HORARIA_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 2, data: { servico } } };
+  // Limpeza e Zeladoria: pergunta dias da semana primeiro
+  return { replies: [DIAS_SEMANA_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 2, data: { servico } } };
 }
 
 function handleOrcamentoFluxo(incoming, state) {
@@ -722,7 +725,37 @@ function handleOrcamentoFluxo(incoming, state) {
   }
 
   if (state.step === 2) {
-    data.cargaHoraria = incoming;
+    // Portaria: captura carga horária direto
+    if (servico === "Portaria") {
+      data.cargaHoraria = incoming;
+      return { replies: [ENDERECO_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 3, data } };
+    }
+
+    // Limpeza/Zeladoria: captura dias da semana
+    const incomingNorm = incoming.trim();
+    if (incomingNorm === "1") {
+      data.diasSemana = "segunda a sexta";
+    } else if (incomingNorm === "2") {
+      data.diasSemana = "segunda a sábado";
+    } else {
+      // Aceita texto livre também
+      data.diasSemana = incomingNorm;
+    }
+    return { replies: [HORAS_DIA_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 21, data } };
+  }
+
+  if (state.step === 21) {
+    // Limpeza/Zeladoria: captura horas por dia
+    const incomingNorm = incoming.trim();
+    let horas = "";
+    if (incomingNorm === "1" || incomingNorm.includes("4")) {
+      horas = "4h";
+    } else if (incomingNorm === "2" || incomingNorm.includes("8")) {
+      horas = "8h";
+    } else {
+      horas = incomingNorm;
+    }
+    data.cargaHoraria = `${data.diasSemana}, ${horas}`;
     return { replies: [ENDERECO_PERGUNTA], newState: { menu: "orcamento_fluxo", step: 3, data } };
   }
 
