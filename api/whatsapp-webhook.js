@@ -1121,11 +1121,48 @@ async function handleDuvidaPosProposta({ db, phone, pushName, text }) {
     ultimaMensagemClienteEm: serverTimestamp(),
   });
 
-  // Se ainda não mandamos nenhum check-in de dúvida, essa mensagem é só a
-  // continuação normal da conversa — deixa o menu principal do bot cuidar.
-  if (!orc.duvidaCheck1EnviadoEm) return false;
-
+  const nome = pushName ? pushName.split(" ")[0] : "";
   const classificacao = classificarRespostaDuvida(text);
+
+  // Se ainda não mandamos nenhum check-in mas o cliente já está respondendo,
+  // agradecemos o contato e encerramos — sem abrir o menu.
+  if (!orc.duvidaCheck1EnviadoEm) {
+    if (classificacao === "nao") {
+      await sendText(phone,
+        `Tudo bem${nome ? ", " + nome : ""}! 😊 Agradecemos muito o contato e ficamos à disposição caso mude de ideia. Qualquer coisa, é só chamar!\n\n` +
+        `📞 (51) 3058-6391 / 99889-3033`
+      );
+      await updateDoc(doc(db, "orcamentos", orc.id), {
+        duvidaEncerrada: true,
+        duvidaRespostaEm: serverTimestamp(),
+      });
+      return true;
+    }
+    if (classificacao === "sim" || classificacao === "ambiguo") {
+      await sendText(phone,
+        `Que ótimo${nome ? ", " + nome : ""}! 😊 Nosso especialista já vai entrar em contato com você para esclarecer todos os detalhes.\n\n` +
+        `📞 (51) 3058-6391 / 99889-3033`
+      );
+      await sendText(ESPECIALISTA_WHATSAPP,
+        `📋 *Cliente interessado após proposta*\n\n` +
+        `👤 Nome: ${pushName || "(sem nome)"}\n` +
+        `📱 Telefone: ${phone}\n` +
+        `🧾 Serviço: ${orc.servico || "não informado"}\n` +
+        `💬 Mensagem: "${text}"`
+      );
+      await updateDoc(doc(db, "orcamentos", orc.id), {
+        encaminhadoEspecialista: true,
+        duvidaRespostaEm: serverTimestamp(),
+      });
+      return true;
+    }
+    // Mensagem genérica após proposta — agradece e encerra sem abrir menu
+    await sendText(phone,
+      `Obrigado pelo retorno${nome ? ", " + nome : ""}! 😊 Nossa equipe já está de olho e entrará em contato em breve.\n\n` +
+      `Se precisar de algo, é só chamar! 📞 (51) 3058-6391 / 99889-3033`
+    );
+    return true;
+  }
 
   if (classificacao === "nao") {
     await sendText(phone,
@@ -1138,10 +1175,7 @@ async function handleDuvidaPosProposta({ db, phone, pushName, text }) {
     return true;
   }
 
-  // "sim" ou ambígua: por segurança, preferimos encaminhar pro especialista
-  // a arriscar perder um cliente interessado por causa de uma resposta
-  // que não bateu 100% com o texto esperado.
-  const nome = pushName ? pushName.split(" ")[0] : "";
+  // "sim" ou ambígua: encaminha pro especialista
   await sendText(phone,
     `Perfeito${nome ? ", " + nome : ""}! 👍 Vou passar você para o nosso especialista, ele já entra em contato com você por aqui.`
   );
