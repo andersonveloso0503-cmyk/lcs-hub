@@ -159,6 +159,81 @@ async function claimOrcamento(db, docId, lockField = "propostaLockedAt") {
   }
 }
 
+async function runPropostaCheck(db) {
+  const DELAY_MS = 5 * 60 * 1000; // 5 minutos
+  const agora = Date.now();
+  const results = [];
+
+  const snap = await getDocs(
+    query(collection(db, "orcamentos"), where("propostaEnviada", "==", false))
+  );
+
+  for (const docSnap of snap.docs) {
+    const orc = docSnap.data();
+
+    let since = 0;
+    if (orc.createdAt && typeof orc.createdAt.toMillis === "function") {
+      since = orc.createdAt.toMillis();
+    } else if (orc.propostaPendenteSince) {
+      since = Number(orc.propostaPendenteSince) || 0;
+    }
+
+    if (since > 0 && agora - since < DELAY_MS) {
+      results.push({ id: docSnap.id, skipped: true, reason: `Aguardando ${Math.round((DELAY_MS - (agora - since)) / 1000)}s` });
+      continue;
+    }
+
+    const claimed = await claimOrcamento(db, docSnap.id, "propostaLockedAt");
+    if (!claimed) {
+      results.push({ id: docSnap.id, skipped: true, reason: "Lock ativo" });
+      continue;
+    }
+
+    try {
+      let phone = orc.phone || "";
+      // Normaliza número: adiciona 9 se estiver faltando
+      let digits = phone.replace(/\D/g, "");
+      if (!digits.startsWith("55")) digits = "55" + digits;
+      if (digits.length === 12) digits = digits.slice(0, 4) + "9" + digits.slice(4);
+      phone = digits;
+
+      const proposta = selecionarPdfProposta(orc);
+
+      if (proposta && proposta.url) {
+        await sendDocumentProposta(phone, proposta.url, proposta.fileName,
+          `Pronto! 🎉 Segue a proposta comercial da *LCS Terceirização*!`
+        );
+        await sendTextProposta(phone,
+          `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
+          `• 📹 CFTV — câmeras de monitoramento\n` +
+          `• 🚗 Leitores de placa veicular\n` +
+          `• 👤 Biometria facial\n\n` +
+          `_Esses serviços podem ser orçados separadamente. Qualquer dúvida é só chamar!_ 😊`
+        );
+      } else {
+        const servico = orc.servico || "serviço";
+        await sendTextProposta(phone,
+          `Olá! 😊 Nossa equipe está finalizando o orçamento para *${servico}* e entrará em contato em breve.\n\n` +
+          `📞 (51) 3058-6391 / 99889-3033`
+        );
+      }
+
+      await updateDoc(doc(db, "orcamentos", docSnap.id), {
+        propostaEnviada: true,
+        propostaEnviadaEm: serverTimestamp(),
+      });
+
+      results.push({ id: docSnap.id, phone, ok: true });
+      console.log(`[auto-week/proposta] ✅ Proposta enviada para ${phone}`);
+    } catch (err) {
+      console.error(`[auto-week/proposta] ❌ ${docSnap.id}: ${err.message}`);
+      results.push({ id: docSnap.id, ok: false, error: err.message });
+    }
+  }
+
+  return results;
+}
+
 const MENSAGEM_DUVIDA_PROPOSTA =
   `Ficou com alguma dúvida sobre a proposta? Gostaria de falar com um especialista? 😊\n\n` +
   `Responde *sim* ou *não* que eu já te ajudo!`;
@@ -238,86 +313,6 @@ async function runDuvidaCheck(db) {
     } catch (err) {
       console.error(`[auto-week/duvida] ❌ ${docSnap.id}: ${err.message}`);
       results.push({ id: docSnap.id, ok: false, error: err.message });
-    }
-  }
-
-  return results;
-}
-
-
-  const DELAY_MS = 5 * 60 * 1000; // 5 minutos
-  const agora = Date.now();
-  const results = [];
-
-  // Busca orçamentos com proposta ainda não enviada
-  const snap = await getDocs(
-    query(collection(db, "orcamentos"), where("propostaEnviada", "==", false))
-  );
-
-  for (const docSnap of snap.docs) {
-    const orc = docSnap.data();
-
-    // Usa createdAt (Timestamp do Firestore) para calcular o tempo decorrido
-    // O propostaPendenteSince é int64 e não funciona bem com Date.now()
-    let since = 0;
-    if (orc.createdAt && typeof orc.createdAt.toMillis === "function") {
-      since = orc.createdAt.toMillis();
-    } else if (orc.propostaPendenteSince) {
-      // Fallback: tenta usar propostaPendenteSince como número
-      since = Number(orc.propostaPendenteSince) || 0;
-    }
-
-    if (since > 0 && agora - since < DELAY_MS) {
-      results.push({ id: docSnap.id, skipped: true, reason: `Aguardando ${Math.round((DELAY_MS - (agora - since)) / 1000)}s` });
-      continue;
-    }
-
-    // Trava o orçamento antes de mandar qualquer mensagem — se outro
-    // disparo já pegou esse mesmo registro nos últimos 2 minutos, pula.
-    const claimed = await claimOrcamento(db, docSnap.id);
-    if (!claimed) {
-      results.push({ id: docSnap.id, skipped: true, reason: "Já enviado ou sendo processado por outro disparo (lock ativo)" });
-      continue;
-    }
-
-    try {
-      const phone   = orc.phone;
-      const servico = orc.servico || "serviço";
-      const proposta = selecionarPdfProposta(orc);
-
-      if (proposta && proposta.url) {
-        await sendDocumentProposta(phone, proposta.url, proposta.fileName,
-          `Pronto! 🎉 Segue a proposta comercial da *LCS Terceirização*!`
-        );
-        await sendTextProposta(phone,
-          `🔒 Além disso, trabalhamos com soluções complementares de segurança:\n` +
-          `• 📹 CFTV — câmeras de monitoramento\n` +
-          `• 🚗 Leitores de placa veicular\n` +
-          `• 👤 Biometria facial\n\n` +
-          `_Esses serviços podem ser orçados separadamente. Qualquer dúvida é só chamar!_ 😊`
-        );
-      } else {
-        const servico = orc.servico || "serviço";
-        await sendTextProposta(phone,
-          `Olá! 😊 Nossa equipe está finalizando o orçamento para *${servico}* e entrará em contato em breve.\n\n` +
-          `📞 (51) 3058-6391 / 99889-3033`
-        );
-      }
-
-      // Marca como enviada
-      await updateDoc(doc(db, "orcamentos", docSnap.id), {
-        propostaEnviada: true,
-        propostaEnviadaEm: serverTimestamp(),
-      });
-
-      results.push({ id: docSnap.id, phone, ok: true });
-      console.log(`[auto-week/proposta] ✅ Proposta enviada para ${phone}`);
-    } catch (err) {
-      console.error(`[auto-week/proposta] ❌ ${docSnap.id}: ${err.message}`);
-      results.push({ id: docSnap.id, ok: false, error: err.message });
-      // Não desfazemos o lock aqui de propósito: ele expira sozinho em 2 minutos
-      // (LOCK_TTL_MS), o que dá tempo suficiente pra não colidir com o próximo
-      // disparo automático, mas ainda permite nova tentativa em breve.
     }
   }
 
