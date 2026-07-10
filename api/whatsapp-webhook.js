@@ -1610,6 +1610,29 @@ export default async function handler(req, res) {
         const botSkipped = BOT_SKIP_STATUSES.includes(currentStatus);
 
         if (!botSkipped) {
+          // Atualiza ultimaMensagemClienteEm em qualquer orçamento aberto desse cliente
+          // ANTES de qualquer processamento — garante que o cron não vai mandar
+          // check-in duplicado mesmo se handleDuvidaPosProposta falhar por algum motivo.
+          try {
+            const orcSnap = await getDocs(
+              query(
+                collection(db, "orcamentos"),
+                where("phone", "==", phone),
+                where("propostaEnviada", "==", true)
+              )
+            );
+            for (const orcDoc of orcSnap.docs) {
+              const orc = orcDoc.data();
+              if (orc.encaminhadoEspecialista !== true && orc.duvidaEncerrada !== true) {
+                await updateDoc(doc(db, "orcamentos", orcDoc.id), {
+                  ultimaMensagemClienteEm: serverTimestamp(),
+                });
+              }
+            }
+          } catch (updateErr) {
+            console.error("Erro ao atualizar ultimaMensagemClienteEm:", updateErr);
+          }
+
           let tratadoPelaDuvida = false;
           if (messageDoc.type === "text") {
             try {
