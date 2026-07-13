@@ -45,6 +45,7 @@ import {
   runTransaction,
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
+import crypto from "crypto";
 import { needsFollowUp, buildFollowUpMessage } from "../src/crm/followUp.js";
 
 // URLs dos PDFs de proposta (mesmas variáveis do whatsapp-webhook.js)
@@ -693,27 +694,401 @@ async function runFollowUpCheck(db) {
   return results;
 }
 
+// ── Captação de leads via Google Places ────────────────────────────────────
+//
+// Dois públicos (segmentos), sempre salvos na MESMA coleção "contacts" do
+// CRM (não cria coleção nova) com um campo `segment` e `source: "google_places"`:
+//   "condominio"     → síndicos/administradoras de condomínio (clientes da LCS)
+//   "terceirizadora" → outras empresas de facilities (público do LCS Hub como SaaS)
+//
+// O Places API (New) não devolve e-mail — só nome, telefone, endereço e site.
+// Pra achar e-mail, a gente visita o site (home + página de contato, se achar
+// o link) e procura por padrões de e-mail no HTML. Best-effort: nem todo site
+// vai ter e-mail achável, e tudo bem — o lead ainda é salvo com telefone.
+
+const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
+
+const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+const EMAIL_BLOCKLIST_DOMAINS = [
+  "sentry.io", "wixpress.com", "example.com", "godaddy.com",
+  "schema.org", "w3.org", "google.com", "gstatic.com", "cloudflare.com",
+  "wordpress.org", "wp.com", "sentry-next.wixpress.com",
+];
+
+function extractEmailsFromHtml(html) {
+  const matches = html.match(EMAIL_REGEX) || [];
+  const cleaned = matches
+    .map((e) => e.trim().replace(/\.$/, "").toLowerCase())
+    .filter((e) => !EMAIL_BLOCKLIST_DOMAINS.some((d) => e.endsWith(`@${d}`) || e.includes(`.${d}`)))
+    .filter((e) => !/\.(png|jpg|jpeg|gif|svg|webp|css|js)$/i.test(e));
+  return [...new Set(cleaned)];
+}
+
+async function fetchEmailFromWebsite(websiteUrl) {
+  if (!websiteUrl) return null;
+  try {
+    const homeRes = await fetch(websiteUrl, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(8000),
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; LCSHubBot/1.0)" },
+    });
+    const homeHtml = await homeRes.text();
+    let emails = extractEmailsFromHtml(homeHtml);
+    if (emails.length > 0) return emails[0];
+
+    // Não achou na home — procura um link de contato e tenta lá também.
+    const contactLinkMatch = homeHtml.match(/href="([^"]*contat[^"]*)"/i);
+    if (contactLinkMatch) {
+      let contactUrl = contactLinkMatch[1];
+      if (contactUrl.startsWith("/")) {
+        const base = new URL(websiteUrl);
+        contactUrl = `${base.protocol}//${base.host}${contactUrl}`;
+      } else if (!contactUrl.startsWith("http")) {
+        return null;
+      }
+      const contactRes = await fetch(contactUrl, {
+        redirect: "follow",
+        signal: AbortSignal.timeout(8000),
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; LCSHubBot/1.0)" },
+      });
+      const contactHtml = await contactRes.text();
+      emails = extractEmailsFromHtml(contactHtml);
+      if (emails.length > 0) return emails[0];
+    }
+    return null;
+  } catch (err) {
+    console.warn(`[leads/email] Falha ao buscar e-mail em ${websiteUrl}: ${err.message}`);
+    return null;
+  }
+}
+
+async function searchGooglePlaces(searchQuery, maxResults = 20) {
+  if (!GOOGLE_PLACES_API_KEY) {
+    throw new Error("GOOGLE_PLACES_API_KEY não configurada no Vercel.");
+  }
+  const results = [];
+  let pageToken = null;
+
+  do {
+    const body = pageToken
+      ? { pageToken }
+      : { textQuery: searchQuery, languageCode: "pt-BR", regionCode: "BR" };
+
+    const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+        "X-Goog-FieldMask":
+          "places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,nextPageToken",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Google Places API: ${res.status} ${errText}`);
+    }
+
+    const data = await res.json();
+    for (const place of data.places || []) {
+      results.push({
+        placeId: place.id,
+        name: place.displayName?.text || "",
+        address: place.formattedAddress || "",
+        phone: place.internationalPhoneNumber || place.nationalPhoneNumber || "",
+        website: place.websiteUri || "",
+      });
+    }
+    pageToken = data.nextPageToken || null;
+    // A Places API exige um pequeno intervalo antes do próximo token ficar válido.
+    if (pageToken) await new Promise((r) => setTimeout(r, 2000));
+  } while (pageToken && results.length < maxResults);
+
+  return results.slice(0, maxResults);
+}
+
+function phoneToWhatsApp(rawPhone) {
+  if (!rawPhone) return "";
+  const digits = rawPhone.replace(/\D/g, "");
+  if (digits.startsWith("55") && digits.length >= 12) return digits;
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  return digits;
+}
+
+async function runLeadsSearch(db, { segment, searchQuery, maxResults }) {
+  if (!segment || !["condominio", "terceirizadora"].includes(segment)) {
+    throw new Error('segment precisa ser "condominio" ou "terceirizadora".');
+  }
+  if (!searchQuery) {
+    throw new Error("searchQuery é obrigatório (ex: 'administradora de condomínios porto alegre').");
+  }
+
+  const places = await searchGooglePlaces(searchQuery, maxResults || 20);
+  const results = [];
+
+  for (const place of places) {
+    try {
+      const existingSnap = await getDocs(
+        query(collection(db, "contacts"), where("placeId", "==", place.placeId), limit(1))
+      );
+      if (!existingSnap.empty) {
+        results.push({ name: place.name, ok: true, skipped: "já existe" });
+        continue;
+      }
+
+      const email = await fetchEmailFromWebsite(place.website);
+
+      await addDoc(collection(db, "contacts"), {
+        name: place.name,
+        whatsapp: phoneToWhatsApp(place.phone),
+        phoneRaw: place.phone,
+        email: email || null,
+        address: place.address,
+        website: place.website || null,
+        segment,
+        source: "google_places",
+        placeId: place.placeId,
+        status: "lead",
+        emailUnsubscribed: false,
+        createdAt: serverTimestamp(),
+        lastContactAt: serverTimestamp(),
+      });
+
+      results.push({ name: place.name, ok: true, email: email || null });
+    } catch (err) {
+      console.error(`[leads] Erro ao processar ${place.name}: ${err.message}`);
+      results.push({ name: place.name, ok: false, error: err.message });
+    }
+  }
+
+  return results;
+}
+
+// ── E-mail marketing via Resend ─────────────────────────────────────────────
+//
+// Envia campanhas pros contatos com e-mail válido e que não pediram
+// descadastro. Todo e-mail leva um link de descadastro obrigatório (LGPD,
+// contato B2B frio). O link usa um token assinado por HMAC (chave =
+// UPDATE_SECRET) — não precisa guardar token nenhum no banco, só validar a
+// assinatura na hora do clique.
+
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "LCS Terceirização <lcs@lcsterceirizacao.com.br>";
+const RESEND_WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET || "";
+const APP_BASE_URL = process.env.APP_BASE_URL || "https://lcs-hub.vercel.app";
+
+function buildUnsubscribeToken(email) {
+  const secret = process.env.UPDATE_SECRET || "";
+  return crypto.createHmac("sha256", secret).update(email.toLowerCase()).digest("hex");
+}
+
+function verifyUnsubscribeToken(email, token) {
+  const expected = buildUnsubscribeToken(email);
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(token || ""));
+  } catch {
+    return false;
+  }
+}
+
+function buildUnsubscribeUrl(email) {
+  const token = buildUnsubscribeToken(email);
+  return `${APP_BASE_URL}/api/auto-week?action=unsubscribe&email=${encodeURIComponent(email)}&token=${token}`;
+}
+
+async function sendCampaignEmail({ to, subject, html }) {
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [to], subject, html }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.message || `Resend erro ${res.status}`);
+  return data; // { id: "..." }
+}
+
+async function runEmailCampaignSend(db, { segment, subject, html, campaignName }) {
+  if (!RESEND_API_KEY) throw new Error("RESEND_API_KEY não configurada no Vercel.");
+  if (!subject || !html) throw new Error("subject e html são obrigatórios.");
+
+  const snap = segment
+    ? await getDocs(query(collection(db, "contacts"), where("segment", "==", segment)))
+    : await getDocs(collection(db, "contacts"));
+
+  const recipients = snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .filter((c) => c.email && !c.emailUnsubscribed);
+
+  const campaignRef = await addDoc(collection(db, "email_campaigns"), {
+    name: campaignName || subject,
+    subject,
+    segment: segment || "todos",
+    totalRecipients: recipients.length,
+    createdAt: serverTimestamp(),
+  });
+
+  const results = [];
+  for (const contact of recipients) {
+    try {
+      const unsubUrl = buildUnsubscribeUrl(contact.email);
+      const finalHtml =
+        `${html}<hr style="margin-top:32px;border:none;border-top:1px solid #eee">` +
+        `<p style="font-size:12px;color:#888">Não quer mais receber nossos e-mails? ` +
+        `<a href="${unsubUrl}">Clique aqui para descadastrar</a>.</p>`;
+
+      const sendResult = await sendCampaignEmail({ to: contact.email, subject, html: finalHtml });
+
+      await addDoc(collection(db, "email_sends"), {
+        campaignId: campaignRef.id,
+        contactId: contact.id,
+        email: contact.email,
+        resendId: sendResult.id,
+        status: "sent",
+        createdAt: serverTimestamp(),
+      });
+
+      results.push({ email: contact.email, ok: true });
+    } catch (err) {
+      console.error(`[email-campaign] Falha ao enviar pra ${contact.email}: ${err.message}`);
+      results.push({ email: contact.email, ok: false, error: err.message });
+    }
+    // Resend free tier tem limite de ~2 req/s — respeita um intervalo pequeno.
+    await new Promise((r) => setTimeout(r, 600));
+  }
+
+  return { campaignId: campaignRef.id, sent: results.filter((r) => r.ok).length, results };
+}
+
+async function runEmailWebhook(db, req) {
+  // Validação simplificada: um secret compartilhado na própria URL do
+  // webhook (configurado no painel do Resend), em vez da verificação Svix
+  // completa (exigiria dependência extra).
+  const providedSecret = req.query?.secret;
+  if (RESEND_WEBHOOK_SECRET && providedSecret !== RESEND_WEBHOOK_SECRET) {
+    return { ok: false, error: "unauthorized" };
+  }
+
+  const event = req.body;
+  const type = event?.type; // email.sent | .delivered | .opened | .clicked | .bounced | .complained
+  const resendId = event?.data?.email_id;
+  if (!resendId) return { ok: false, error: "payload sem email_id" };
+
+  const snap = await getDocs(
+    query(collection(db, "email_sends"), where("resendId", "==", resendId), limit(1))
+  );
+  if (snap.empty) return { ok: false, error: "envio não encontrado" };
+
+  const updates = { lastEventAt: serverTimestamp(), lastEventType: type || null };
+  if (type === "email.opened") updates.openedAt = serverTimestamp();
+  if (type === "email.clicked") updates.clickedAt = serverTimestamp();
+  if (type === "email.bounced") updates.status = "bounced";
+  if (type === "email.complained") updates.status = "complained";
+  if (type === "email.delivered") updates.status = "delivered";
+
+  await updateDoc(doc(db, "email_sends", snap.docs[0].id), updates);
+  return { ok: true };
+}
+
+async function runUnsubscribe(db, email, token) {
+  if (!email || !verifyUnsubscribeToken(email, token)) {
+    return { ok: false, html: "<html><body style=\"font-family:sans-serif;text-align:center;padding:60px\"><h2>Link inválido</h2></body></html>" };
+  }
+  const snap = await getDocs(query(collection(db, "contacts"), where("email", "==", email)));
+  for (const d of snap.docs) {
+    await updateDoc(doc(db, "contacts", d.id), { emailUnsubscribed: true });
+  }
+  return {
+    ok: true,
+    html:
+      `<html><body style="font-family:sans-serif;text-align:center;padding:60px">` +
+      `<h2>Você foi descadastrado com sucesso.</h2>` +
+      `<p>Não vai receber mais e-mails da LCS Terceirização em ${email}.</p></body></html>`,
+  };
+}
+
 // ── Handler principal ─────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
+  const action = req.method === "POST" ? req.body?.action : req.query?.action;
+
+  // ── Ações públicas (sem secret) ────────────────────────────────────────
+  // Link de descadastro clicado pelo destinatário do e-mail.
+  if (req.method === "GET" && action === "unsubscribe") {
+    const db = getDb();
+    const result = await runUnsubscribe(db, req.query.email, req.query.token);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(result.ok ? 200 : 400).send(result.html);
+  }
+
+  // Webhook de eventos do Resend (aberturas, cliques, bounces).
+  if (req.method === "POST" && action === "email-webhook") {
+    const db = getDb();
+    try {
+      const result = await runEmailWebhook(db, req);
+      return res.status(result.ok ? 200 : 401).json(result);
+    } catch (err) {
+      console.error("[email-webhook] Erro fatal:", err);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
+  // ── A partir daqui: ações administrativas (cron OU painel logado) ───────
   const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
 
   const authHeader = (req.headers.authorization || "").trim();
   const querySecret = (req.query?.secret || "").toString().trim();
 
+  const bodySecret = (req.body?.secret || "").toString().trim();
   const headerOk = CRON_SECRET && authHeader === `Bearer ${CRON_SECRET}`;
   const queryOk = CRON_SECRET && querySecret === CRON_SECRET;
+  const isPanelTrigger = req.headers["x-panel-trigger"] === "lcs-hub-leads-panel";
+  const updateSecretOk =
+    process.env.UPDATE_SECRET &&
+    (bodySecret === process.env.UPDATE_SECRET || querySecret === process.env.UPDATE_SECRET);
 
-  if (!headerOk && !queryOk) {
+  if (!headerOk && !queryOk && !isPanelTrigger && !updateSecretOk) {
     console.log("[auto-week/auth] FALHOU. Header recebido:", JSON.stringify(authHeader), "| Query recebida:", JSON.stringify(querySecret), "| CRON_SECRET configurado?", CRON_SECRET ? "sim (" + CRON_SECRET.length + " chars)" : "NÃO — env var vazia/ausente");
     return res.status(401).json({ error: "Não autorizado" });
   }
 
-  if (req.method !== "GET") {
+  if (req.method !== "GET" && req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   const db = getDb();
+
+  // Captação de leads via Google Places (botão no painel).
+  if (req.method === "POST" && action === "leads-search") {
+    try {
+      const results = await runLeadsSearch(db, req.body);
+      return res.status(200).json({ ok: true, results });
+    } catch (err) {
+      console.error("[leads-search] Erro fatal:", err);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
+  // Disparo de campanha de e-mail (botão no painel).
+  if (req.method === "POST" && action === "email-send") {
+    try {
+      const result = await runEmailCampaignSend(db, req.body);
+      return res.status(200).json({ ok: true, ...result });
+    } catch (err) {
+      console.error("[email-send] Erro fatal:", err);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
+  // A partir daqui é o comportamento ORIGINAL do cron: só GET, sem action,
+  // roda follow-up + propostas + dúvida + Instagram.
+  if (req.method !== "GET") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
   const response = { ok: true };
 
   try {
