@@ -1136,6 +1136,38 @@ async function findOrcamentoAbertoParaDuvida(db, phone) {
 }
 
 /**
+ * Para em definitivo o follow-up automático GERAL do CRM (o de
+ * src/crm/followUp.js, rodado dentro do cron auto-week.js pela função
+ * runFollowUpCheck/needsFollowUp em cima da coleção "contacts").
+ *
+ * Esse sistema é totalmente separado do check-in de dúvida pós-proposta
+ * (que vive na coleção "orcamentos") e por isso não tinha como saber que o
+ * cliente já respondeu — ele olha só `lastContactAt`/`status`/
+ * `autoFollowUpCount` do contato. Aqui a gente:
+ *   1) atualiza `lastContactAt` pra agora (reseta a contagem de dias
+ *      atrasados que o `needsFollowUp` usa)
+ *   2) força `autoFollowUpCount` bem acima do limite (`MAX_AUTO_FOLLOWUPS`,
+ *      hoje 3 no auto-week.js) pra travar de vez, mesmo que no futuro esse
+ *      limite mude
+ * Assim, uma vez que o cliente respondeu (sim, não, ou qualquer coisa) ao
+ * check-in pós-proposta, o CRM nunca mais dispara reengajamento automático
+ * pra esse contato — só um humano reabrindo o caso manualmente.
+ */
+async function stopAutoFollowUpParaContato(db, phone) {
+  try {
+    const contact = await findContactByPhone(db, phone);
+    if (!contact) return;
+    await updateDoc(doc(db, "contacts", contact.id), {
+      lastContactAt: serverTimestamp(),
+      autoFollowUpCount: 999,
+      autoFollowUpParadoEm: serverTimestamp(),
+    });
+  } catch (err) {
+    console.error("Erro ao parar follow-up automático do contato:", err);
+  }
+}
+
+/**
  * Roda para toda mensagem de texto recebida do cliente. Se ele tiver um
  * orçamento com proposta já enviada e ainda em aberto, marca que ele
  * respondeu (pra o cron parar de mandar check-in) e, se o check-in já
@@ -1153,6 +1185,15 @@ async function handleDuvidaPosProposta({ db, phone, pushName, text }) {
   await updateDoc(doc(db, "orcamentos", orc.id), {
     ultimaMensagemClienteEm: serverTimestamp(),
   });
+
+  // Trava também o follow-up GERAL do CRM (coleção "contacts", disparado por
+  // runFollowUpCheck/needsFollowUp em auto-week.js). Esse sistema é
+  // independente do check-in de dúvida acima e não sabia que o cliente já
+  // tinha respondido — por isso continuava mandando a mensagem de
+  // reengajamento ("Passando para saber se ainda tem interesse...") mesmo
+  // depois de um "sim" ou "não". Ao responder qualquer coisa aqui, paramos
+  // esse follow-up automático de vez pra esse contato.
+  await stopAutoFollowUpParaContato(db, phone);
 
   const nome = pushName ? pushName.split(" ")[0] : "";
   const classificacao = classificarRespostaDuvida(text);
