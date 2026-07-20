@@ -603,7 +603,7 @@ async function uploadToBlob(base64, filename) {
 
 // Quantas vezes o cron pode mandar follow-up automático pro mesmo contato
 // antes de desistir e deixar pra alguém decidir na mão (ver Home do site).
-const MAX_AUTO_FOLLOWUPS = 3;
+const MAX_AUTO_FOLLOWUPS = 1;
 
 function normalizePhoneForFollowUp(raw) {
   let digits = (raw || "").toString().replace(/\D/g, "");
@@ -652,7 +652,11 @@ async function runFollowUpCheck(db) {
   const snap = await getDocs(collection(db, "contacts"));
   const contacts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
+  const SKIP_STATUSES = ["contrato", "cliente", "inativo"];
+
   const pending = contacts.filter((c) => {
+    // Nunca manda follow-up para clientes com contrato ativo ou inativos
+    if (SKIP_STATUSES.includes((c.status || "").toLowerCase())) return false;
     if ((c.autoFollowUpCount || 0) >= MAX_AUTO_FOLLOWUPS) return false;
     if (!isValidPhoneForWhatsApp(c.whatsapp)) {
       console.warn(`[auto-week/followup] ⚠️ Pulando ${c.name || c.id} — whatsapp inválido: ${JSON.stringify(c.whatsapp)}`);
