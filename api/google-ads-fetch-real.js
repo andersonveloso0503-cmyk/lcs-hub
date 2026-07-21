@@ -597,7 +597,11 @@ async function addNegativeKeyword(accessToken, campaignId, term) {
       },
     ],
   };
-  return runMutation(accessToken, "campaignCriteria:mutate", body);
+  const result = await runMutation(accessToken, "campaignCriteria:mutate", body);
+  // Devolve o resourceName do critério recém-criado — é o identificador
+  // que o Histórico de Ações precisa guardar para poder remover essa
+  // mesma palavra negativa depois, caso o usuário clique em "Desfazer".
+  return result?.results?.[0]?.resourceName || null;
 }
 
 /**
@@ -617,6 +621,37 @@ async function pauseCampaign(accessToken, campaignId) {
     ],
   };
   return runMutation(accessToken, "campaigns:mutate", body);
+}
+
+/**
+ * 4.2b — Reverte a pausa de uma campanha, voltando o status para ENABLED.
+ * Usado pelo botão "Desfazer" do Histórico de Ações quando a campanha foi
+ * pausada pela otimização automática (mesma mutação de pauseCampaign, só
+ * que com o status invertido).
+ */
+async function resumeCampaign(accessToken, campaignId) {
+  const campaignResourceName = `customers/${CUSTOMER_ID}/campaigns/${campaignId}`;
+  const body = {
+    operations: [
+      {
+        update: { resourceName: campaignResourceName, status: "ENABLED" },
+        updateMask: "status",
+      },
+    ],
+  };
+  return runMutation(accessToken, "campaigns:mutate", body);
+}
+
+/**
+ * 4.1b — Remove uma palavra-chave negativa aplicada anteriormente, usando
+ * o resourceName do critério que foi devolvido pela própria chamada de
+ * criação (addNegativeKeyword). Usado pelo botão "Desfazer".
+ */
+async function removeNegativeKeywordByResourceName(accessToken, criterionResourceName) {
+  const body = {
+    operations: [{ remove: criterionResourceName }],
+  };
+  return runMutation(accessToken, "campaignCriteria:mutate", body);
 }
 
 /**
@@ -1582,6 +1617,68 @@ async function createAbTestAds(accessToken, campaignId, serviceLabel, finalUrl) 
  * falha individual (ex.: uma chamada de mutate específica falhar) não
  * interrompe as demais — erros ficam no array `errors` para diagnóstico.
  */
+// Tipos de ação que sabemos reverter com segurança hoje (têm todos os
+// dados necessários guardados e uma mutação de "volta" implementada).
+// Os outros tipos (bidding_strategy, hourly_bid, device_bid, geo_bid,
+// add_keyword, create_ad) ainda aparecem no histórico para
+// acompanhamento, mas sem botão de desfazer — a reversão deles ainda não
+// foi construída.
+const REVERTIBLE_TYPES = new Set(["pause_campaign", "negative_keyword", "budget_reduction"]);
+
+/**
+ * Salva cada ação aplicada pela otimização automática numa coleção própria
+ * do Firestore, para a tela "Histórico de Ações" do painel poder listar o
+ * que foi feito e oferecer "Desfazer" nas ações revertíveis. Uma falha
+ * aqui nunca deve impedir a otimização em si de ter sido aplicada — por
+ * isso os erros só são logados, nunca propagados.
+ */
+async function logActionHistory(db, appliedList) {
+  if (!appliedList || appliedList.length === 0) return;
+  const batch = db.batch();
+  const collectionRef = db.collection("google_ads_action_history");
+  for (const item of appliedList) {
+    const ref = collectionRef.doc();
+    batch.set(ref, {
+      ...item,
+      applied_at: new Date().toISOString(),
+      revertible: REVERTIBLE_TYPES.has(item.type),
+      reverted: false,
+      reverted_at: null,
+    });
+  }
+  try {
+    await batch.commit();
+  } catch (err) {
+    console.error("Erro ao salvar histórico de ações (não bloqueia a otimização):", err.message);
+  }
+}
+
+/**
+ * Desfaz uma ação previamente aplicada e registrada no histórico,
+ * usando os dados que foram guardados no momento em que ela rodou.
+ */
+async function revertAction(accessToken, db, historyId) {
+  const ref = db.collection("google_ads_action_history").doc(historyId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Ação não encontrada no histórico.");
+  const item = snap.data();
+  if (item.reverted) throw new Error("Essa ação já foi desfeita anteriormente.");
+  if (!REVERTIBLE_TYPES.has(item.type)) throw new Error("Esse tipo de ação ainda não pode ser desfeito automaticamente.");
+
+  if (item.type === "pause_campaign") {
+    await resumeCampaign(accessToken, item.campaign_id);
+  } else if (item.type === "negative_keyword") {
+    if (!item.resource_name) throw new Error("Essa palavra negativa foi aplicada antes dessa função existir — remova manualmente no Google Ads.");
+    await removeNegativeKeywordByResourceName(accessToken, item.resource_name);
+  } else if (item.type === "budget_reduction") {
+    if (!item.budget_resource_name) throw new Error("Orçamento sem referência salva — ajuste manualmente no Google Ads.");
+    await updateCampaignBudget(accessToken, item.budget_resource_name, item.old_amount);
+  }
+
+  await ref.update({ reverted: true, reverted_at: new Date().toISOString() });
+  return { ok: true, type: item.type, campaign: item.campaign };
+}
+
 async function runAutoOptimizations(accessToken) {
   const db = getAdminDb();
 
@@ -1617,7 +1714,7 @@ async function runAutoOptimizations(accessToken) {
     for (const c of toPause) {
       try {
         await pauseCampaign(accessToken, c.campaign_id);
-        applied.push({ type: "pause_campaign", campaign: c.name, lcs_score: c.lcs_score });
+        applied.push({ type: "pause_campaign", campaign: c.name, campaign_id: c.campaign_id, lcs_score: c.lcs_score });
       } catch (err) {
         errors.push({ type: "pause_campaign", campaign: c.name, message: err.message });
       }
@@ -1629,8 +1726,14 @@ async function runAutoOptimizations(accessToken) {
     const toApply = suggestions.filter((s) => s.confidence === "alta" && inScope(s.campaign_id));
     for (const s of toApply) {
       try {
-        await addNegativeKeyword(accessToken, s.campaign_id, s.term);
-        applied.push({ type: "negative_keyword", campaign: s.campaign_name, term: s.term });
+        const resourceName = await addNegativeKeyword(accessToken, s.campaign_id, s.term);
+        applied.push({
+          type: "negative_keyword",
+          campaign: s.campaign_name,
+          campaign_id: s.campaign_id,
+          term: s.term,
+          resource_name: resourceName,
+        });
       } catch (err) {
         errors.push({ type: "negative_keyword", term: s.term, message: err.message });
       }
@@ -1666,6 +1769,8 @@ async function runAutoOptimizations(accessToken) {
         applied.push({
           type: "budget_reduction",
           campaign: c.name,
+          campaign_id: c.campaign_id,
+          budget_resource_name: c.budget_resource_name,
           lcs_score: c.lcs_score,
           old_amount: c.budget_amount,
           new_amount: newAmount,
@@ -2188,6 +2293,7 @@ export default async function handler(req, res) {
     action === "pause_campaign" ||
     action === "update_budget" ||
     action === "run_auto_optimizations" ||
+    action === "revert_action" ||
     action === "generate_ad_copy" ||
     action === "create_ad" ||
     action === "suggest_keywords" ||
@@ -2276,6 +2382,14 @@ export default async function handler(req, res) {
 
       if (action === "run_auto_optimizations") {
         const result = await runAutoOptimizations(accessToken);
+        await logActionHistory(getAdminDb(), result.applied);
+        return res.status(200).json({ ok: true, ...result });
+      }
+
+      if (action === "revert_action") {
+        const { history_id } = req.body;
+        if (!history_id) return res.status(400).json({ error: "history_id é obrigatório." });
+        const result = await revertAction(accessToken, getAdminDb(), history_id);
         return res.status(200).json({ ok: true, ...result });
       }
 
@@ -2647,6 +2761,7 @@ export default async function handler(req, res) {
     if (isCron || req.body?.autoOptimize === true) {
       try {
         autoOptimizeResult = await runAutoOptimizations(accessToken);
+        await logActionHistory(db, autoOptimizeResult.applied);
         if (autoOptimizeResult.applied?.length > 0) {
           const summary = autoOptimizeResult.applied
             .map((a) => {
@@ -2654,11 +2769,19 @@ export default async function handler(req, res) {
               if (a.type === "negative_keyword") return `🎯 Negativa aplicada: "${a.term}" em "${a.campaign}"`;
               if (a.type === "budget_reduction")
                 return `💰 Orçamento de "${a.campaign}" reduzido: R$${a.old_amount.toFixed(2)} → R$${a.new_amount.toFixed(2)}`;
+              if (a.type === "bidding_strategy") return `🎯 Estratégia de lance de "${a.campaign}": ${a.from} → ${a.to}`;
+              if (a.type === "hourly_bid") return `🕐 Lance por horário ajustado em "${a.campaign}" (${a.hour}h)`;
+              if (a.type === "device_bid") return `📱 Lance por dispositivo ajustado em "${a.campaign}" (${a.device})`;
+              if (a.type === "geo_bid") return `📍 Lance por região ajustado em "${a.campaign}"`;
+              if (a.type === "add_keyword") return `➕ Palavra-chave "${a.term}" adicionada em "${a.campaign}"`;
+              if (a.type === "create_ad") return `📝 Novo anúncio (pausado) criado em "${a.campaign}" pra revisar`;
               return null;
             })
             .filter(Boolean)
             .join("\n");
-          await sendWhatsAppAlert(`🤖 *Otimizações automáticas aplicadas — LCS Hub*\n\n${summary}`);
+          await sendWhatsAppAlert(
+            `🤖 *Otimizações automáticas aplicadas — LCS Hub*\n\n${summary}\n\nRevise no painel: lcs-hub.vercel.app/google-ads/otimizacoes — dá pra desfazer pausa, palavra negativa e corte de orçamento por lá.`
+          );
         }
       } catch (err) {
         console.error("Erro ao rodar otimizações automáticas (não bloqueia o snapshot):", err.message);

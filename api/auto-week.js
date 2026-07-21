@@ -1014,6 +1014,37 @@ async function runUnsubscribe(db, email, token) {
   };
 }
 
+// Google Ads — sincroniza campanhas e roda a otimização automática
+// reaproveitando TODA a lógica que já existe em api/google-ads-fetch-real.js
+// (busca via GAQL, detecção de alertas, stop loss, negative keywords,
+// recomendações e runAutoOptimizations), em vez de duplicar isso aqui.
+// A chamada é uma requisição HTTP interna autenticada com o mesmo
+// CRON_SECRET que a Vercel já usa pra disparar crons — isso faz o handler
+// de google-ads-fetch-real.js entrar no mesmo caminho "isCron" que já
+// dispara runAutoOptimizations sozinho (ver isCron || req.body?.autoOptimize
+// no final daquele arquivo). Assim não precisa de um segundo cron job
+// configurado na Vercel, só um passo a mais dentro do cron diário existente.
+async function runGoogleAdsSync() {
+  const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
+  const baseUrl = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : "https://lcs-hub.vercel.app";
+
+  const res = await fetch(`${baseUrl}/api/google-ads-fetch-real`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${CRON_SECRET}` },
+  });
+
+  const raw = await res.text();
+  let data = {};
+  try { data = JSON.parse(raw); } catch { /* resposta não era JSON */ }
+
+  if (!res.ok) {
+    throw new Error(`google-ads-fetch-real retornou ${res.status}: ${data.error || raw.slice(0, 200)}`);
+  }
+  return data;
+}
+
 // ── Handler principal ─────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
@@ -1133,7 +1164,22 @@ export default async function handler(req, res) {
       response.duvidaCheck = { error: duvidaErr.message };
     }
 
-    // 3) Instagram — verifica se é hora de gerar (pode ser ignorado com ?force=true)
+    // 3) Google Ads — sincroniza campanhas e roda otimizações automáticas
+    // (pausar campanha ruim, aplicar negativa, reduzir orçamento etc.)
+    try {
+      const googleAdsResult = await runGoogleAdsSync();
+      response.googleAds = {
+        ok: true,
+        campaigns: googleAdsResult.count,
+        alerts: googleAdsResult.alerts?.length || 0,
+        autoOptimize: googleAdsResult.auto_optimize || null,
+      };
+    } catch (googleAdsErr) {
+      console.error("[auto-week/google-ads] Erro fatal:", googleAdsErr);
+      response.googleAds = { error: googleAdsErr.message };
+    }
+
+    // 4) Instagram — verifica se é hora de gerar (pode ser ignorado com ?force=true)
     const force = req.query?.force === "true";
 
     if (!force) {
