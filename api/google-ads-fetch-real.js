@@ -1706,17 +1706,57 @@ async function runAutoOptimizations(accessToken) {
   const applied = [];
   const errors = [];
 
-  // --- Pausar campanhas com Score baixo ---
+  // --- Pausar campanhas com Score baixo — mas só depois de dar alguns
+  // dias pra elas melhorarem sozinhas com as outras otimizações ativas
+  // (palavra negativa, lance, orçamento). Em vez de pausar na primeira
+  // rodada com nota baixa, contamos quantos dias seguidos a campanha
+  // ficou com nota baixa (google_ads_campaign_state/{campaign_id}); só
+  // pausa de fato quando bate PAUSE_GRACE_DAYS dias seguidos ruim. Se a
+  // nota se recupera antes disso, a contagem zera.
+  const PAUSE_GRACE_DAYS = 3;
   if (enabled.pause_campaigns) {
-    const toPause = campaigns.filter(
+    const lowScore = campaigns.filter(
       (c) => c.status === "ENABLED" && typeof c.lcs_score === "number" && c.lcs_score < 5 && inScope(c.campaign_id)
     );
-    for (const c of toPause) {
+    for (const c of lowScore) {
+      const stateRef = db.collection("google_ads_campaign_state").doc(c.campaign_id);
       try {
-        await pauseCampaign(accessToken, c.campaign_id);
-        applied.push({ type: "pause_campaign", campaign: c.name, campaign_id: c.campaign_id, lcs_score: c.lcs_score });
+        const stateSnap = await stateRef.get();
+        const streak = (stateSnap.exists ? stateSnap.data().low_score_streak || 0 : 0) + 1;
+        if (streak < PAUSE_GRACE_DAYS) {
+          // Ainda dentro do prazo de tentar melhorar — não pausa, só
+          // registra a contagem e deixa as outras otimizações (lance,
+          // palavra negativa, orçamento) agirem nessa campanha nos
+          // próximos dias.
+          await stateRef.set({ low_score_streak: streak, last_score: c.lcs_score, updated_at: new Date().toISOString() });
+          applied.push({
+            type: "improve_attempt",
+            campaign: c.name,
+            campaign_id: c.campaign_id,
+            lcs_score: c.lcs_score,
+            streak,
+            grace_days: PAUSE_GRACE_DAYS,
+          });
+        } else {
+          await pauseCampaign(accessToken, c.campaign_id);
+          applied.push({ type: "pause_campaign", campaign: c.name, campaign_id: c.campaign_id, lcs_score: c.lcs_score });
+          await stateRef.delete();
+        }
       } catch (err) {
         errors.push({ type: "pause_campaign", campaign: c.name, message: err.message });
+      }
+    }
+
+    // Campanhas que voltaram a ter nota boa zeram a contagem — não
+    // ficam "acumulando" dias ruins de execuções antigas e não-consecutivas.
+    const recovered = campaigns.filter(
+      (c) => c.status === "ENABLED" && typeof c.lcs_score === "number" && c.lcs_score >= 5 && inScope(c.campaign_id)
+    );
+    for (const c of recovered) {
+      try {
+        await db.collection("google_ads_campaign_state").doc(c.campaign_id).delete();
+      } catch (err) {
+        // não crítico — a pior consequência é a contagem não zerar essa rodada
       }
     }
   }
@@ -2766,6 +2806,7 @@ export default async function handler(req, res) {
           const summary = autoOptimizeResult.applied
             .map((a) => {
               if (a.type === "pause_campaign") return `⏸ Pausada: "${a.campaign}" (score ${a.lcs_score})`;
+              if (a.type === "improve_attempt") return `🔧 "${a.campaign}" com nota baixa (${a.lcs_score}) — tentando melhorar (dia ${a.streak}/${a.grace_days} antes de pausar)`;
               if (a.type === "negative_keyword") return `🎯 Negativa aplicada: "${a.term}" em "${a.campaign}"`;
               if (a.type === "budget_reduction")
                 return `💰 Orçamento de "${a.campaign}" reduzido: R$${a.old_amount.toFixed(2)} → R$${a.new_amount.toFixed(2)}`;
