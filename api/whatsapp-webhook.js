@@ -1864,14 +1864,28 @@ async function rotinaEnviarWhatsapp({ db, origem }) {
     return { enviados: 0, limiteDiarioAtingido: true, enviadosHoje, limite: PROSPECCAO_LIMITE_DIARIO };
   }
 
-  const q = query(
+  // Dois grupos elegíveis pro WhatsApp:
+  //  1) quem recebeu email e interagiu (abriu/clicou) — comportamento normal.
+  //  2) quem nunca teve email pra começo de conversa (não tem como
+  //     "interagir" com algo que nunca recebeu) mas tem telefone — esses vão
+  //     direto pro WhatsApp com a mesma mensagem padrão.
+  const qInteragiu = query(
     collection(db, "leads_prospeccao"),
     where("status", "==", "email_enviado"),
     where("interagiuEmail", "==", true),
     limit(vagasHoje * 2) // folga extra porque parte pode não ter telefone
   );
-  const snap = await getDocs(q);
-  const candidatos = snap.docs.map((leadDoc) => ({ id: leadDoc.id, lead: leadDoc.data() }));
+  const qSemEmail = query(
+    collection(db, "leads_prospeccao"),
+    where("status", "==", "novo"),
+    where("email", "==", null),
+    limit(vagasHoje * 2)
+  );
+  const [snapInteragiu, snapSemEmail] = await Promise.all([getDocs(qInteragiu), getDocs(qSemEmail)]);
+  const candidatos = [
+    ...snapInteragiu.docs.map((leadDoc) => ({ id: leadDoc.id, lead: leadDoc.data() })),
+    ...snapSemEmail.docs.map((leadDoc) => ({ id: leadDoc.id, lead: leadDoc.data() })),
+  ];
 
   let enviados = enviadosHoje;
   let semTelefone = 0;
