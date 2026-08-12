@@ -9,6 +9,7 @@ import InstagramModule from "./pages/InstagramModule";
 import GoogleAdsModule from "./pages/GoogleAdsModule";
 import GoogleAdsOptimizations from "./pages/GoogleAdsOptimizations";
 import BlogGeneratorModule from "./pages/BlogGeneratorModule";
+import ProspeccaoModule from "./pages/ProspeccaoModule";
 import "./App.css";
 
 function Gate() {
@@ -26,6 +27,7 @@ function Gate() {
         <Route path="google-ads" element={<GoogleAdsModule />} />
         <Route path="google-ads/optimizations" element={<GoogleAdsOptimizations />} />
         <Route path="blog" element={<BlogGeneratorModule />} />
+        <Route path="prospeccao" element={<ProspeccaoModule />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
