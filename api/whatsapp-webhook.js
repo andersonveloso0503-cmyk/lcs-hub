@@ -1319,6 +1319,56 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
 
   if (messageDoc.type === "document" && state?.menu === "curriculo_aguardando") {
     await sendTextSequence(phone, [curriculoRecebidoMensagem()]);
+
+    // Encaminha o currículo pro fiscal operacional automaticamente.
+    // Se o PDF chegou com URL pública (foi para o Blob), manda via Evolution;
+    // caso contrário manda pelo menos um aviso com os dados do candidato.
+    try {
+      const FISCAL_WHATSAPP = process.env.FISCAL_OPERACIONAL_WHATSAPP || "5551997711809";
+      const nomeCandidato = pushName || phone;
+      const infoTexto = state?.data?.infoTexto || "Não informado";
+
+      if (messageDoc.fileUrl) {
+        // Manda primeiro um aviso de texto, depois o arquivo
+        await sendText(
+          normalizePhoneForSend(FISCAL_WHATSAPP),
+          `🔔 *Atenção, chegou um novo currículo pelo WhatsApp!*\n\n` +
+            `Nome: ${nomeCandidato}\n` +
+            `WhatsApp: ${phone}\n` +
+            `Interesse/Vaga: ${infoTexto}\n\n` +
+            `O arquivo está logo abaixo 👇`
+        );
+        await new Promise((r) => setTimeout(r, 800));
+        // Manda o arquivo direto pro fiscal
+        await fetch(`${EVOLUTION_BASE_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+          body: JSON.stringify({
+            number: normalizePhoneForSend(FISCAL_WHATSAPP),
+            mediatype: "document",
+            media: messageDoc.fileUrl,
+            fileName: messageDoc.fileName || "curriculo.pdf",
+            caption:
+              `📋 *Novo currículo recebido*\n\n` +
+              `Nome: ${nomeCandidato}\n` +
+              `WhatsApp: ${phone}\n` +
+              `Interesse/Vaga: ${infoTexto}`,
+          }),
+        });
+      } else {
+        // Arquivo não chegou com URL pública — manda só o aviso de texto
+        await sendText(
+          normalizePhoneForSend(FISCAL_WHATSAPP),
+          `📋 *Novo currículo recebido* (sem URL pública — arquivo pode estar no Inbox do CRM)\n\n` +
+            `Nome: ${nomeCandidato}\n` +
+            `WhatsApp: ${phone}\n` +
+            `Interesse/Vaga: ${infoTexto}`
+        );
+      }
+    } catch (fiscalErr) {
+      console.error("Erro ao encaminhar currículo pro fiscal:", fiscalErr);
+    }
+
     await setDoc(stateRef, {
       menu: "main",
       step: 0,
