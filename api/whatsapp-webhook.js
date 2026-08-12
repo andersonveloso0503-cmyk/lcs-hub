@@ -604,30 +604,6 @@ function emptyState() {
   return { menu: "main", step: 0, data: {} };
 }
 
-// ============================================================================
-// Rastreio de origem — cada canal (anúncio Google, site, Instagram) usa um
-// link wa.me com um texto pré-preenchido diferente. A pessoa não precisa
-// digitar nada: o WhatsApp já abre com essa frase pronta, e detectamos aqui
-// na PRIMEIRA mensagem de cada conversa nova (antes de qualquer resposta do
-// bot mudar o texto). Depois de detectada, a origem fica salva no
-// bot_state/{phone} pro resto da conversa, inclusive pra usar no
-// encaminhamento de currículo pro fiscal.
-const ORIGIN_TRIGGERS = [
-  { match: "vim pelo anúncio", label: "Anúncio Google Ads" },
-  { match: "vim pelo google", label: "Anúncio Google Ads" },
-  { match: "vim pelo site", label: "Site" },
-  { match: "vim pelo instagram", label: "Instagram" },
-  { match: "vim pelo facebook", label: "Facebook" },
-  { match: "vim pelo google meu negócio", label: "Google Meu Negócio" },
-];
-
-function detectMessageOrigin(text) {
-  const lower = (text || "").trim().toLowerCase();
-  if (!lower) return null;
-  const hit = ORIGIN_TRIGGERS.find((o) => lower.includes(o.match));
-  return hit ? hit.label : null;
-}
-
 // Quantas vezes seguidas o bot pode mandar o menu principal sem a pessoa
 // escolher uma opção válida, antes de desistir e ficar em silêncio. Evita
 // ficar respondendo em loop quando quem está do outro lado é um número que
@@ -1335,17 +1311,6 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
   const stateSnap = await getDoc(stateRef);
   const state = stateSnap.exists() ? stateSnap.data() : null;
 
-  // Conversa nova (primeira mensagem desse número): detecta se veio de um
-  // link com origem rastreada (anúncio, site, Instagram...) e já grava isso
-  // no bot_state, pra usar depois no aviso de currículo pro fiscal e em
-  // qualquer análise futura. Mensagens seguintes não sobrescrevem — a
-  // origem é sempre a da primeira mensagem da conversa.
-  let detectedOrigin = null;
-  if (!state && messageDoc.type === "text") {
-    detectedOrigin = detectMessageOrigin(messageDoc.text);
-  }
-  const origem = state?.origem || detectedOrigin || null;
-
   // Se estiver pausado (ex: um atendente humano assumiu a conversa), o bot
   // fica em silêncio — a não ser que a pessoa mande "menu"/"voltar", caso em
   // que entendemos que ela quer retomar o atendimento automático.
@@ -1354,66 +1319,12 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
 
   if (messageDoc.type === "document" && state?.menu === "curriculo_aguardando") {
     await sendTextSequence(phone, [curriculoRecebidoMensagem()]);
-
-    // Encaminha o currículo pro fiscal operacional automaticamente.
-    // Se o PDF chegou com URL pública (foi para o Blob), manda via Evolution;
-    // caso contrário manda pelo menos um aviso com os dados do candidato.
-    try {
-      const FISCAL_WHATSAPP = process.env.FISCAL_OPERACIONAL_WHATSAPP || "5551997711809";
-      const nomeCandidato = pushName || phone;
-      const infoTexto = state?.data?.infoTexto || "Não informado";
-
-      if (messageDoc.fileUrl) {
-        // Manda primeiro um aviso de texto, depois o arquivo
-        await sendText(
-          normalizePhoneForSend(FISCAL_WHATSAPP),
-          `🔔 *Atenção, chegou um novo currículo pelo WhatsApp!*\n\n` +
-            `Nome: ${nomeCandidato}\n` +
-            `WhatsApp: ${phone}\n` +
-            `Interesse/Vaga: ${infoTexto}\n` +
-            `Origem: ${origem || "não identificada (WhatsApp direto)"}\n\n` +
-            `O arquivo está logo abaixo 👇`
-        );
-        await new Promise((r) => setTimeout(r, 800));
-        // Manda o arquivo direto pro fiscal
-        await fetch(`${EVOLUTION_BASE_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
-          body: JSON.stringify({
-            number: normalizePhoneForSend(FISCAL_WHATSAPP),
-            mediatype: "document",
-            media: messageDoc.fileUrl,
-            fileName: messageDoc.fileName || "curriculo.pdf",
-            caption:
-              `📋 *Novo currículo recebido*\n\n` +
-              `Nome: ${nomeCandidato}\n` +
-              `WhatsApp: ${phone}\n` +
-              `Interesse/Vaga: ${infoTexto}\n` +
-              `Origem: ${origem || "não identificada"}`,
-          }),
-        });
-      } else {
-        // Arquivo não chegou com URL pública — manda só o aviso de texto
-        await sendText(
-          normalizePhoneForSend(FISCAL_WHATSAPP),
-          `📋 *Novo currículo recebido* (sem URL pública — arquivo pode estar no Inbox do CRM)\n\n` +
-            `Nome: ${nomeCandidato}\n` +
-            `WhatsApp: ${phone}\n` +
-            `Interesse/Vaga: ${infoTexto}\n` +
-            `Origem: ${origem || "não identificada"}`
-        );
-      }
-    } catch (fiscalErr) {
-      console.error("Erro ao encaminhar currículo pro fiscal:", fiscalErr);
-    }
-
     await setDoc(stateRef, {
       menu: "main",
       step: 0,
       data: {},
       paused: false,
       curriculoRecebido: true,
-      origem,
       lastBotSentAt: Date.now(),
       updatedAt: serverTimestamp(),
     });
@@ -1454,14 +1365,13 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
     data: result.newState.data || {},
     paused: !!result.newState.paused,
     greetCount: result.newState.greetCount || 0,
-    origem,
     lastBotSentAt: Date.now(),
     lastBotMessageIds: sentMessageIds,
     updatedAt: serverTimestamp(),
   });
 
   if (result.statusUpdate) {
-    await upsertContactFromBot(db, phone, pushName, result.statusUpdate, origem ? { origem } : {});
+    await upsertContactFromBot(db, phone, pushName, result.statusUpdate);
   }
 
   if (result.sendDocument === "apresentacao_empresa") {
@@ -2221,6 +2131,45 @@ export default async function handler(req, res) {
     await addDoc(collection(db, "whatsapp_messages"), messageDoc);
 
     if (!fromMe) {
+      // Encaminha qualquer PDF recebido pro fiscal operacional, independente
+      // de o candidato ter passado pelo menu ou não.
+      if (messageDoc.type === "document") {
+        try {
+          const FISCAL_WHATSAPP = process.env.FISCAL_OPERACIONAL_WHATSAPP || "5551997711809";
+          const nomeCandidato = pushName || phone;
+          const stateSnapFiscal = await getDoc(doc(db, "bot_state", phone));
+          const infoTexto = stateSnapFiscal.exists()
+            ? stateSnapFiscal.data()?.data?.infoTexto || "Não informado"
+            : "Não informado";
+
+          await sendText(
+            normalizePhoneForSend(FISCAL_WHATSAPP),
+            `🔔 *Novo documento recebido pelo WhatsApp!*\n\n` +
+              `Nome: ${nomeCandidato}\n` +
+              `WhatsApp: ${phone}\n` +
+              `Interesse/Vaga: ${infoTexto}\n\n` +
+              `O arquivo está logo abaixo 👇`
+          );
+          await new Promise((r) => setTimeout(r, 800));
+
+          if (messageDoc.fileUrl) {
+            await fetch(`${EVOLUTION_BASE_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+              body: JSON.stringify({
+                number: normalizePhoneForSend(FISCAL_WHATSAPP),
+                mediatype: "document",
+                media: messageDoc.fileUrl,
+                fileName: messageDoc.fileName || "documento.pdf",
+                caption: `📄 ${messageDoc.fileName || "documento"}`,
+              }),
+            });
+          }
+        } catch (fiscalErr) {
+          console.error("Erro ao encaminhar documento pro fiscal:", fiscalErr);
+        }
+      }
+
       try {
         await applyAutoClassification({
           db,
