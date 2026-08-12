@@ -1547,6 +1547,21 @@ function checkProspeccaoSecret(req) {
   return req.headers["x-prospeccao-secret"] === PROSPECCAO_SECRET;
 }
 
+// Segmentos padrão pra quando a busca roda sozinha (sem query/segmento no
+// corpo da requisição, ex: disparada por um cron diário). Alterna pelo dia
+// do mês — dia par busca empresas, dia ímpar busca condomínios — assim um
+// único cron rodando todo dia já cobre os dois segmentos sem repetir sempre
+// o mesmo.
+const SEGMENTOS_PADRAO = [
+  { valor: "condominios", query: "condomínios em Porto Alegre" },
+  { valor: "empresas", query: "empresas em Porto Alegre" },
+];
+
+function segmentoDoDia() {
+  const dia = new Date().getDate(); // dia do mês (1-31)
+  return SEGMENTOS_PADRAO[dia % 2];
+}
+
 // --- 1) Busca de leads via Google Places -----------------------------------
 
 async function buscarLugaresGooglePlaces(queryText) {
@@ -1921,8 +1936,13 @@ export default async function handler(req, res) {
   // ROTEAMENTO: Prospecção Ativa (busca leads → email → WhatsApp)
   // Protegido por header "x-prospeccao-secret" (variável PROSPECCAO_SECRET).
   // Chamadas esperadas (ex: via cron-job.org, method POST):
-  //   { action: "prospeccao_buscar", query: "condomínios em Porto Alegre",
-  //     segmento: "condominios", maxResults: 20 }
+  //   { action: "prospeccao_buscar" }   → SEM query/segmento, alterna
+  //     sozinho entre "condomínios" e "empresas" dependendo do dia do mês
+  //     (par = empresas, ímpar = condomínios). Ideal pra automação diária:
+  //     um cron só, rodando todo dia, sem precisar escolher nada.
+  //   { action: "prospeccao_buscar", query: "...", segmento: "...", maxResults: 20 }
+  //     → uso manual (ex: o botão "Buscar leads" do app), força um segmento
+  //     específico em vez do automático do dia.
   //   { action: "prospeccao_email" }    (envia no máx. PROSPECCAO_LIMITE_DIARIO por dia)
   //   { action: "prospeccao_whatsapp" }  (só manda pra quem interagiu com o email)
   // --------------------------------------------------------------------
@@ -1933,10 +1953,19 @@ export default async function handler(req, res) {
     const db = getDb();
     try {
       if (req.body.action === "prospeccao_buscar") {
-        const { query: queryText, segmento, maxResults } = req.body;
-        if (!queryText) return res.status(400).json({ error: "Campo 'query' é obrigatório" });
-        const resultado = await rotinaBuscarLeads({ db, queryText, segmento, maxResults });
-        return res.status(200).json(resultado);
+        let { query: queryText, segmento, maxResults } = req.body;
+        if (!queryText) {
+          const padrao = segmentoDoDia();
+          queryText = padrao.query;
+          segmento = padrao.valor;
+        }
+        const resultado = await rotinaBuscarLeads({
+          db,
+          queryText,
+          segmento,
+          maxResults: maxResults || 5,
+        });
+        return res.status(200).json({ ...resultado, segmentoUsado: segmento });
       }
       if (req.body.action === "prospeccao_email") {
         const resultado = await rotinaEnviarEmails({ db });
