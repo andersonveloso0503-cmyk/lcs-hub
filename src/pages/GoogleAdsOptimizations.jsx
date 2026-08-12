@@ -19,6 +19,7 @@ import {
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "../firebase/config";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
+import ActionHistoryCard from "../googleads/ActionHistoryCard";
 
 // Catálogo completo de otimizações no estilo GIO Brain. As 3 marcadas com
 // available: true já têm a mutação real implementada no backend
@@ -258,9 +259,12 @@ export default function GoogleAdsOptimizations() {
       </div>
 
       <p className="muted" style={{ fontSize: 12, marginTop: -10, marginBottom: 16 }}>
-        As otimizações ativadas abaixo rodam automaticamente todos os dias às 8h (horário de
-        Brasília), e também sempre que sincronizar manualmente nesta tela com o botão "Rodar agora".
+        As otimizações ativadas abaixo rodam automaticamente todos os dias às 7h (horário de
+        Brasília), junto com o restante da rotina diária, e também sempre que sincronizar
+        manualmente nesta tela com o botão "Rodar agora".
       </p>
+
+      <ActionHistoryCard />
 
       {runResult && (
         <div
@@ -282,6 +286,7 @@ export default function GoogleAdsOptimizations() {
                     {runResult.data.applied.map((a, i) => (
                       <li key={i} style={{ fontSize: 13 }}>
                         {a.type === "pause_campaign" && `⏸ Pausada: "${a.campaign}" (score ${a.lcs_score})`}
+                        {a.type === "improve_attempt" && `🔧 "${a.campaign}" nota baixa (${a.lcs_score}) — tentando melhorar (dia ${a.streak}/${a.grace_days})`}
                         {a.type === "negative_keyword" && `🎯 Negativa: "${a.term}" em "${a.campaign}"`}
                         {a.type === "add_keyword" && `➕ Palavra-chave: "${a.term}" em "${a.campaign}"`}
                         {a.type === "create_ad" && `✨ Anúncio criado (pausado) em "${a.campaign}" / "${a.ad_group}"`}
