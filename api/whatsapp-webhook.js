@@ -74,6 +74,32 @@ const PDF_PROPOSTAS = {
   limpeza_4h_sexta:   process.env.PDF_LIMPEZA_4H_SEXTA   || "",
   zeladoria_8h_sabado:process.env.PDF_ZELADORIA_8H_SABADO|| "",
 };
+// ============================================================================
+// Prospecção Ativa (busca de leads → email → WhatsApp)
+// ============================================================================
+// Chave da Google Places API (Text Search + Place Details). Gerar em
+// console.cloud.google.com → APIs & Serviços → Credenciais (mesmo projeto
+// Google Cloud usado pro Google Ads, ou um novo — precisa ativar "Places API").
+const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
+
+// Resend (envio de email). RESEND_FROM_EMAIL precisa ser de um domínio
+// verificado no Resend (ex: contato@lcsterceirizacaors.com.br).
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "";
+const RESEND_FROM_NAME = process.env.RESEND_FROM_NAME || "LCS Terceirização";
+
+// Segredo simples pra proteger as rotas de prospecção (mesmo padrão do
+// UPDATE_SECRET usado em api/google-ads-update-snapshot.js). Cron-job.org
+// (ou qualquer disparo manual) precisa mandar esse valor no header
+// "x-prospeccao-secret".
+const PROSPECCAO_SECRET = process.env.PROSPECCAO_SECRET || "";
+
+// Limite de quantas apresentações (email OU WhatsApp, cada canal com seu
+// próprio contador) podem ser mandadas por dia pra leads novos, pra não
+// parecer disparo em massa. Vale mesmo que a action seja chamada várias
+// vezes no mesmo dia — o contador fica salvo no Firestore.
+const PROSPECCAO_LIMITE_DIARIO = parseInt(process.env.PROSPECCAO_LIMITE_DIARIO || "5", 10);
+
 // Projeto Firebase para envio de push notifications (FCM)
 const FCM_PROJECT_ID = "lcscrm";
 
@@ -1495,9 +1521,378 @@ async function uploadMediaToBlob(base64, mimetype, extensionHint) {
   }
 }
 
+// ============================================================================
+// Prospecção Ativa (antes em nenhum arquivo — novo, trazido direto pra cá
+// pelo mesmo motivo do resto: não estourar o limite de 12 Serverless
+// Functions do plano Hobby da Vercel).
+//
+// Fluxo, em 3 chamadas separadas (pra você poder rodar cada etapa quando
+// quiser, ou automatizar via cron-job.org com um intervalo entre elas):
+//
+//   1) action: "prospeccao_buscar"   → busca lugares no Google Places,
+//      salva em Firestore (coleção "leads_prospeccao") com status "novo".
+//   2) action: "prospeccao_email"    → manda email de apresentação pros
+//      leads "novo" que têm email, muda status pra "email_enviado".
+//   3) action: "prospeccao_whatsapp" → manda WhatsApp pros leads
+//      "email_enviado" há X dias (ou sem email, direto), muda status pra
+//      "whatsapp_enviado".
+//
+// Se o lead responder o WhatsApp, cai no fluxo normal do webhook (mais
+// abaixo neste arquivo) como qualquer contato novo — não precisa de nada
+// especial aqui pra isso funcionar.
+// ============================================================================
+
+function checkProspeccaoSecret(req) {
+  if (!PROSPECCAO_SECRET) return true; // sem segredo configurado = sem checagem (defina em produção!)
+  return req.headers["x-prospeccao-secret"] === PROSPECCAO_SECRET;
+}
+
+// --- 1) Busca de leads via Google Places -----------------------------------
+
+async function buscarLugaresGooglePlaces(queryText) {
+  if (!GOOGLE_PLACES_API_KEY) throw new Error("GOOGLE_PLACES_API_KEY não configurada");
+
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(
+    queryText
+  )}&key=${GOOGLE_PLACES_API_KEY}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+    throw new Error(`Google Places retornou status ${data.status}: ${data.error_message || ""}`);
+  }
+  return data.results || [];
+}
+
+async function buscarDetalhesLugar(placeId) {
+  const fields = "name,international_phone_number,formatted_phone_number,website,formatted_address";
+  const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=${fields}&key=${GOOGLE_PLACES_API_KEY}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.status !== "OK") return null;
+  return data.result || null;
+}
+
+// Melhor esforço: tenta achar um email visível na home do site do lugar.
+// Não funciona pra todo site (JS-heavy, formulário sem email visível, etc) —
+// quando não acha, o lead segue sem email e recebe só o WhatsApp direto.
+async function tentarEncontrarEmailNoSite(website) {
+  if (!website) return null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(website, { signal: controller.signal });
+    clearTimeout(timeout);
+    const html = await res.text();
+    const match = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    return match ? match[0] : null;
+  } catch {
+    return null; // site fora do ar, timeout, bloqueio, etc — segue sem email
+  }
+}
+
+async function rotinaBuscarLeads({ db, queryText, segmento, maxResults }) {
+  const lugares = await buscarLugaresGooglePlaces(queryText);
+  const limitados = lugares.slice(0, maxResults || 20);
+
+  let novos = 0;
+  let jaExistiam = 0;
+
+  for (const lugar of limitados) {
+    const placeId = lugar.place_id;
+    if (!placeId) continue;
+
+    const leadRef = doc(db, "leads_prospeccao", placeId);
+    const existente = await getDoc(leadRef);
+    if (existente.exists()) {
+      jaExistiam++;
+      continue; // nunca sobrescreve um lead que já está em andamento
+    }
+
+    const detalhes = await buscarDetalhesLugar(placeId);
+    const telefone = detalhes?.international_phone_number || detalhes?.formatted_phone_number || null;
+    const website = detalhes?.website || null;
+    const email = await tentarEncontrarEmailNoSite(website);
+
+    await setDoc(leadRef, {
+      placeId,
+      nome: lugar.name || detalhes?.name || "",
+      endereco: lugar.formatted_address || detalhes?.formatted_address || "",
+      telefone,
+      website,
+      email,
+      segmento: segmento || "",
+      status: "novo",
+      criadoEm: serverTimestamp(),
+    });
+    novos++;
+  }
+
+  return { encontrados: limitados.length, novos, jaExistiam };
+}
+
+// --- 2) Email de apresentação via Resend ------------------------------------
+
+function montarEmailApresentacao(nomeLead) {
+  const saudacao = nomeLead ? `Olá, equipe ${nomeLead}!` : "Olá!";
+  const subject = "LCS Terceirização — limpeza, portaria e zeladoria";
+  // Copy simples de propósito — ajuste o texto abaixo à vontade.
+  const html = `
+    <div style="font-family: sans-serif; font-size: 15px; color: #222; line-height: 1.5;">
+      <p>${saudacao}</p>
+      <p>
+        Somos a <strong>LCS Terceirização</strong>, de Porto Alegre, e atuamos há mais de 10 anos
+        com serviços de <strong>limpeza</strong>, <strong>portaria/concierge</strong> e
+        <strong>zeladoria</strong> para condomínios e empresas na região.
+      </p>
+      <p>Alguns dos serviços que oferecemos:</p>
+      <ul style="padding-left: 20px; margin: 8px 0;">
+        <li><strong>Portaria 24h</strong> — controle de acesso e atendimento, com equipe própria em regime CLT</li>
+        <li><strong>Ronda diurna</strong> — prevenção e acompanhamento de fluxos internos</li>
+        <li><strong>Limpeza e higienização</strong> — equipe dedicada de áreas comuns e torres</li>
+        <li><strong>Zeladoria e manutenção</strong> — reparos elétricos e hidráulicos, pequenos reparos e conservação predial</li>
+        <li><strong>Jardinagem</strong> — manutenção periódica de áreas verdes</li>
+      </ul>
+      <p>
+        Gostaríamos de apresentar nossos serviços e entender se há alguma necessidade que
+        possamos ajudar a resolver hoje.${
+          EMPRESA_PRESENTATION_URL
+            ? ` <a href="${EMPRESA_PRESENTATION_URL}">Clique aqui para ver nossa apresentação institucional em PDF</a>.`
+            : ""
+        }
+      </p>
+      <p>
+        Em breve entraremos em contato também pelo WhatsApp — mas se preferir, pode responder
+        direto este email.
+      </p>
+      <p>Abraço,<br/>Equipe LCS Terceirização</p>
+    </div>
+  `;
+  return { subject, html };
+}
+
+// --- Controle de limite diário (compartilhado entre email e WhatsApp) ------
+// Cada canal ("email" ou "whatsapp") tem seu próprio contador por dia,
+// guardado em prospeccao_limites/{canal}_{AAAA-MM-DD}. Persistido no
+// Firestore pra valer mesmo se a action for chamada mais de uma vez no
+// mesmo dia (ex: um teste manual + o cron do mesmo dia).
+
+function dataDeHojeStr() {
+  return new Date().toISOString().slice(0, 10); // AAAA-MM-DD
+}
+
+async function contadorDiario(db, canal) {
+  const ref = doc(db, "prospeccao_limites", `${canal}_${dataDeHojeStr()}`);
+  const snap = await getDoc(ref);
+  const enviadosHoje = snap.exists() ? snap.data().enviados || 0 : 0;
+  return { ref, enviadosHoje };
+}
+
+async function enviarEmailResend({ to, nomeLead }) {
+  if (!RESEND_API_KEY || !RESEND_FROM_EMAIL) {
+    return { ok: false, error: "RESEND_API_KEY ou RESEND_FROM_EMAIL não configurados" };
+  }
+  const { subject, html } = montarEmailApresentacao(nomeLead);
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: `${RESEND_FROM_NAME} <${RESEND_FROM_EMAIL}>`,
+        to,
+        subject,
+        html,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { ok: false, error: data?.message || "Erro ao enviar email" };
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+async function rotinaEnviarEmails({ db }) {
+  const { ref: limiteRef, enviadosHoje } = await contadorDiario(db, "email");
+  const vagasHoje = Math.max(0, PROSPECCAO_LIMITE_DIARIO - enviadosHoje);
+
+  if (vagasHoje === 0) {
+    return { enviados: 0, limiteDiarioAtingido: true, enviadosHoje, limite: PROSPECCAO_LIMITE_DIARIO };
+  }
+
+  // Busca uma folga maior que as vagas disponíveis, porque parte dos leads
+  // não tem email cadastrado e vai ser pulada sem consumir vaga.
+  const q = query(
+    collection(db, "leads_prospeccao"),
+    where("status", "==", "novo"),
+    limit(vagasHoje * 3)
+  );
+  const snap = await getDocs(q);
+
+  let enviados = enviadosHoje;
+  let semEmail = 0;
+  let falhas = 0;
+
+  for (const leadDoc of snap.docs) {
+    if (enviados - enviadosHoje >= vagasHoje) break; // bateu o limite de hoje
+
+    const lead = leadDoc.data();
+    if (!lead.email) {
+      semEmail++;
+      continue; // sem email: vai direto pro WhatsApp na próxima etapa
+    }
+    const resultado = await enviarEmailResend({ to: lead.email, nomeLead: lead.nome });
+    if (resultado.ok) {
+      await updateDoc(doc(db, "leads_prospeccao", leadDoc.id), {
+        status: "email_enviado",
+        emailEnviadoEm: serverTimestamp(),
+      });
+      enviados++;
+      await setDoc(limiteRef, { enviados, atualizadoEm: serverTimestamp() }, { merge: true });
+    } else {
+      falhas++;
+      console.error(`Falha ao enviar email pro lead ${leadDoc.id}:`, resultado.error);
+    }
+  }
+
+  return {
+    avaliados: snap.size,
+    enviadosNestaChamada: enviados - enviadosHoje,
+    enviadosHojeNoTotal: enviados,
+    limite: PROSPECCAO_LIMITE_DIARIO,
+    semEmail,
+    falhas,
+  };
+}
+
+// --- Webhook do Resend (marca quando o lead abriu ou clicou no email) ------
+// Configurar no painel do Resend: Webhooks → Add Endpoint → mesma URL deste
+// arquivo (/api/whatsapp-webhook) → eventos "email.opened" e "email.clicked".
+// IMPORTANTE: o Resend só manda "email.opened" se o open tracking estiver
+// habilitado na conta (Resend → Settings → verificar se está ativo).
+async function handleResendWebhook(req, res, db) {
+  const tipo = req.body?.type || "";
+  const toList = req.body?.data?.to;
+  const toEmail = Array.isArray(toList) ? toList[0] : toList;
+
+  if (!toEmail || (tipo !== "email.opened" && tipo !== "email.clicked")) {
+    return res.status(200).json({ ok: true, skipped: true });
+  }
+
+  const q = query(
+    collection(db, "leads_prospeccao"),
+    where("email", "==", toEmail),
+    where("status", "==", "email_enviado"),
+    limit(1)
+  );
+  const snap = await getDocs(q);
+  if (snap.empty) {
+    return res.status(200).json({ ok: true, skipped: true, reason: "lead não encontrado" });
+  }
+
+  await updateDoc(doc(db, "leads_prospeccao", snap.docs[0].id), {
+    interagiuEmail: true,
+    interagiuEmailEm: serverTimestamp(),
+    tipoInteracaoEmail: tipo,
+  });
+
+  return res.status(200).json({ ok: true });
+}
+
+// --- 3) WhatsApp de follow-up -----------------------------------------------
+// Só manda pra quem de fato ABRIU ou CLICOU no email (marcado via webhook do
+// Resend acima) — não manda mais só porque passou um tempo desde o envio.
+
+function montarMensagemWhatsappProspeccao(nomeLead) {
+  const nome = nomeLead ? ` da ${nomeLead}` : "";
+  return (
+    `Olá! Somos da LCS Terceirização, de Porto Alegre 👋\n\n` +
+    `Trabalhamos com limpeza, portaria e zeladoria pra condomínios e empresas, e gostaríamos ` +
+    `de apresentar nossos serviços pro time${nome}.\n\n` +
+    `Faz sentido conversarmos rapidinho?`
+  );
+}
+
+async function rotinaEnviarWhatsapp({ db }) {
+  const { ref: limiteRef, enviadosHoje } = await contadorDiario(db, "whatsapp");
+  const vagasHoje = Math.max(0, PROSPECCAO_LIMITE_DIARIO - enviadosHoje);
+
+  if (vagasHoje === 0) {
+    return { enviados: 0, limiteDiarioAtingido: true, enviadosHoje, limite: PROSPECCAO_LIMITE_DIARIO };
+  }
+
+  const q = query(
+    collection(db, "leads_prospeccao"),
+    where("status", "==", "email_enviado"),
+    where("interagiuEmail", "==", true),
+    limit(vagasHoje * 2) // folga extra porque parte pode não ter telefone
+  );
+  const snap = await getDocs(q);
+  const candidatos = snap.docs.map((leadDoc) => ({ id: leadDoc.id, lead: leadDoc.data() }));
+
+  let enviados = enviadosHoje;
+  let semTelefone = 0;
+  let falhas = 0;
+  let avaliados = 0;
+
+  for (const { id, lead } of candidatos) {
+    if (enviados - enviadosHoje >= vagasHoje) break; // bateu o limite de hoje
+    avaliados++;
+
+    if (!lead.telefone) {
+      semTelefone++;
+      continue;
+    }
+    const resultado = await sendText(lead.telefone, montarMensagemWhatsappProspeccao(lead.nome));
+    if (resultado.ok) {
+      if (EMPRESA_PRESENTATION_URL) {
+        await sendDocumentFromUrl(
+          lead.telefone,
+          EMPRESA_PRESENTATION_URL,
+          "apresentacao-lcs-terceirizacao.pdf",
+          "Nossa apresentação institucional"
+        );
+      }
+      await updateDoc(doc(db, "leads_prospeccao", id), {
+        status: "whatsapp_enviado",
+        whatsappEnviadoEm: serverTimestamp(),
+      });
+      enviados++;
+      await setDoc(limiteRef, { enviados, atualizadoEm: serverTimestamp() }, { merge: true });
+      // Pausa entre envios pra reduzir o risco de o número ser sinalizado
+      // por volume — não elimina o risco, só reduz.
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    } else {
+      falhas++;
+      console.error(`Falha ao enviar WhatsApp pro lead ${id}:`, resultado.error);
+    }
+  }
+
+  return {
+    avaliados,
+    enviadosNestaChamada: enviados - enviadosHoje,
+    enviadosHojeNoTotal: enviados,
+    limite: PROSPECCAO_LIMITE_DIARIO,
+    semTelefone,
+    falhas,
+  };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // --------------------------------------------------------------------
+  // ROTEAMENTO: webhook do Resend (email aberto / clicado)
+  // Configurar em resend.com → Webhooks → mesma URL deste arquivo.
+  // Payload do Resend tem "type" (ex: "email.opened"), sem "action" nem
+  // "event" — é assim que diferenciamos das outras rotas deste arquivo.
+  // --------------------------------------------------------------------
+  if (typeof req.body?.type === "string" && req.body.type.startsWith("email.")) {
+    return handleResendWebhook(req, res, getDb());
   }
 
   // --------------------------------------------------------------------
@@ -1519,6 +1914,42 @@ export default async function handler(req, res) {
     } catch (err) {
       console.error("Erro ao gerar post de blog:", err);
       return res.status(500).json({ error: err.message || "Erro ao gerar post." });
+    }
+  }
+
+  // --------------------------------------------------------------------
+  // ROTEAMENTO: Prospecção Ativa (busca leads → email → WhatsApp)
+  // Protegido por header "x-prospeccao-secret" (variável PROSPECCAO_SECRET).
+  // Chamadas esperadas (ex: via cron-job.org, method POST):
+  //   { action: "prospeccao_buscar", query: "condomínios em Porto Alegre",
+  //     segmento: "condominios", maxResults: 20 }
+  //   { action: "prospeccao_email" }    (envia no máx. PROSPECCAO_LIMITE_DIARIO por dia)
+  //   { action: "prospeccao_whatsapp" }  (só manda pra quem interagiu com o email)
+  // --------------------------------------------------------------------
+  if (req.body?.action?.startsWith("prospeccao_")) {
+    if (!checkProspeccaoSecret(req)) {
+      return res.status(401).json({ error: "x-prospeccao-secret inválido ou ausente" });
+    }
+    const db = getDb();
+    try {
+      if (req.body.action === "prospeccao_buscar") {
+        const { query: queryText, segmento, maxResults } = req.body;
+        if (!queryText) return res.status(400).json({ error: "Campo 'query' é obrigatório" });
+        const resultado = await rotinaBuscarLeads({ db, queryText, segmento, maxResults });
+        return res.status(200).json(resultado);
+      }
+      if (req.body.action === "prospeccao_email") {
+        const resultado = await rotinaEnviarEmails({ db });
+        return res.status(200).json(resultado);
+      }
+      if (req.body.action === "prospeccao_whatsapp") {
+        const resultado = await rotinaEnviarWhatsapp({ db });
+        return res.status(200).json(resultado);
+      }
+      return res.status(400).json({ error: "Action de prospecção desconhecida" });
+    } catch (err) {
+      console.error("Erro na prospecção ativa:", err);
+      return res.status(500).json({ error: err.message || "Erro na prospecção ativa." });
     }
   }
 
