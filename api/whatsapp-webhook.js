@@ -1605,7 +1605,7 @@ async function tentarEncontrarEmailNoSite(website) {
   }
 }
 
-async function rotinaBuscarLeads({ db, queryText, segmento, maxResults }) {
+async function rotinaBuscarLeads({ db, queryText, segmento, maxResults, origem }) {
   const lugares = await buscarLugaresGooglePlaces(queryText);
   const limitados = lugares.slice(0, maxResults || 20);
 
@@ -1637,6 +1637,7 @@ async function rotinaBuscarLeads({ db, queryText, segmento, maxResults }) {
       email,
       segmento: segmento || "",
       status: "novo",
+      origemBusca: origem || "desconhecida",
       criadoEm: serverTimestamp(),
     });
     novos++;
@@ -1729,7 +1730,7 @@ async function enviarEmailResend({ to, nomeLead }) {
   }
 }
 
-async function rotinaEnviarEmails({ db }) {
+async function rotinaEnviarEmails({ db, origem }) {
   const { ref: limiteRef, enviadosHoje } = await contadorDiario(db, "email");
   const vagasHoje = Math.max(0, PROSPECCAO_LIMITE_DIARIO - enviadosHoje);
 
@@ -1763,6 +1764,7 @@ async function rotinaEnviarEmails({ db }) {
       await updateDoc(doc(db, "leads_prospeccao", leadDoc.id), {
         status: "email_enviado",
         emailEnviadoEm: serverTimestamp(),
+        origemEmail: origem || "desconhecida",
       });
       enviados++;
       await setDoc(limiteRef, { enviados, atualizadoEm: serverTimestamp() }, { merge: true });
@@ -1830,7 +1832,7 @@ function montarMensagemWhatsappProspeccao(nomeLead) {
   );
 }
 
-async function rotinaEnviarWhatsapp({ db }) {
+async function rotinaEnviarWhatsapp({ db, origem }) {
   const { ref: limiteRef, enviadosHoje } = await contadorDiario(db, "whatsapp");
   const vagasHoje = Math.max(0, PROSPECCAO_LIMITE_DIARIO - enviadosHoje);
 
@@ -1873,6 +1875,7 @@ async function rotinaEnviarWhatsapp({ db }) {
       await updateDoc(doc(db, "leads_prospeccao", id), {
         status: "whatsapp_enviado",
         whatsappEnviadoEm: serverTimestamp(),
+        origemWhatsapp: origem || "desconhecida",
       });
       enviados++;
       await setDoc(limiteRef, { enviados, atualizadoEm: serverTimestamp() }, { merge: true });
@@ -1951,6 +1954,7 @@ export default async function handler(req, res) {
       return res.status(401).json({ error: "x-prospeccao-secret inválido ou ausente" });
     }
     const db = getDb();
+    const origem = req.body.origem === "cron" ? "cron" : "manual"; // qualquer coisa fora "cron" vira "manual"
     try {
       if (req.body.action === "prospeccao_buscar") {
         let { query: queryText, segmento, maxResults } = req.body;
@@ -1964,15 +1968,16 @@ export default async function handler(req, res) {
           queryText,
           segmento,
           maxResults: maxResults || 5,
+          origem,
         });
         return res.status(200).json({ ...resultado, segmentoUsado: segmento });
       }
       if (req.body.action === "prospeccao_email") {
-        const resultado = await rotinaEnviarEmails({ db });
+        const resultado = await rotinaEnviarEmails({ db, origem });
         return res.status(200).json(resultado);
       }
       if (req.body.action === "prospeccao_whatsapp") {
-        const resultado = await rotinaEnviarWhatsapp({ db });
+        const resultado = await rotinaEnviarWhatsapp({ db, origem });
         return res.status(200).json(resultado);
       }
       return res.status(400).json({ error: "Action de prospecção desconhecida" });
