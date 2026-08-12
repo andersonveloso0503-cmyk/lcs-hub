@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useLeadsProspeccao } from "../prospeccao/useLeadsProspeccao";
 
 // ============================================================================
 // ProspeccaoModule — LCS Hub
@@ -68,6 +69,82 @@ const TRADUCOES = {
   semTelefone: "Sem telefone cadastrado",
   falhas: "Falhas no envio",
 };
+
+const STATUS_INFO = {
+  novo: { label: "Novo", bg: "#EEF2F5", cor: "#5A6B7A" },
+  email_enviado: { label: "Email enviado", bg: "#E6F1FB", cor: "#185FA5" },
+  whatsapp_enviado: { label: "WhatsApp enviado", bg: "#E1F5EE", cor: "#0F6E56" },
+};
+
+function StatusBadge({ status }) {
+  const info = STATUS_INFO[status] || { label: status || "—", bg: "#EEF2F5", cor: "#5A6B7A" };
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "3px 10px",
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 700,
+        background: info.bg,
+        color: info.cor,
+      }}
+    >
+      {info.label}
+    </span>
+  );
+}
+
+function formatarData(timestamp) {
+  if (!timestamp?.toDate) return "—";
+  return timestamp.toDate().toLocaleDateString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function TabelaLeads() {
+  const { leads, loading, error } = useLeadsProspeccao();
+
+  if (loading) return <p style={styles.helperText}>Carregando leads…</p>;
+  if (error) return <p style={styles.errorText}>Erro ao carregar leads: {error}</p>;
+  if (leads.length === 0) {
+    return <p style={styles.helperText}>Nenhum lead ainda. Busca alguns leads acima pra começar.</p>;
+  }
+
+  return (
+    <div style={styles.tableWrap}>
+      <table style={styles.table}>
+        <thead>
+          <tr>
+            <th style={styles.th}>Nome</th>
+            <th style={styles.th}>Status</th>
+            <th style={styles.th}>Interagiu?</th>
+            <th style={styles.th}>Email</th>
+            <th style={styles.th}>Telefone</th>
+            <th style={styles.th}>Encontrado em</th>
+          </tr>
+        </thead>
+        <tbody>
+          {leads.map((lead) => (
+            <tr key={lead.id}>
+              <td style={styles.td}>{lead.nome || "—"}</td>
+              <td style={styles.td}>
+                <StatusBadge status={lead.status} />
+              </td>
+              <td style={styles.td}>{lead.interagiuEmail ? "Sim" : "—"}</td>
+              <td style={styles.td}>{lead.email || "—"}</td>
+              <td style={styles.td}>{lead.telefone || "—"}</td>
+              <td style={styles.td}>{formatarData(lead.criadoEm)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export default function ProspeccaoModule() {
   const [segmento, setSegmento] = useState(SEGMENTOS[0].valor);
@@ -204,6 +281,12 @@ export default function ProspeccaoModule() {
         </button>
         <ResultadoBox resultado={resultWhats} />
       </section>
+
+      <section style={styles.card}>
+        <h2 style={styles.h2}>Leads e status</h2>
+        <p style={styles.helperText}>Atualiza em tempo real, igual o resto do CRM.</p>
+        <TabelaLeads />
+      </section>
     </div>
   );
 }
@@ -306,4 +389,22 @@ const styles = {
   },
   resultLabel: { color: "#5A6B7A" },
   resultValor: { color: "#13202E", fontWeight: 700 },
+  tableWrap: { overflowX: "auto", marginTop: 4 },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
+  th: {
+    textAlign: "left",
+    padding: "8px 10px",
+    borderBottom: "2px solid #E3E8EC",
+    color: "#5A6B7A",
+    fontSize: 12,
+    textTransform: "uppercase",
+    letterSpacing: "0.03em",
+    whiteSpace: "nowrap",
+  },
+  td: {
+    padding: "10px 10px",
+    borderBottom: "1px solid #EEF2F5",
+    color: "#33424F",
+    whiteSpace: "nowrap",
+  },
 };
