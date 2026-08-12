@@ -60,6 +60,15 @@ const EVOLUTION_TOKEN = process.env.EVOLUTION_TOKEN || "833e1efbd3e377537bf10ce7
 // automaticamente ao final do fluxo de orçamento.
 const EMPRESA_PRESENTATION_URL = process.env.EMPRESA_PRESENTATION_URL || "";
 
+// URL pública (Vercel Blob) do logo/imagem da empresa, usado no cabeçalho
+// do email de prospecção. Opcional — se não configurado, o email sai sem
+// imagem, só texto.
+const EMPRESA_LOGO_URL = process.env.EMPRESA_LOGO_URL || "";
+
+// Número de WhatsApp da empresa (com DDI+DDD, só dígitos) pra montar o link
+// clicável "Fale conosco no WhatsApp" dentro do email de prospecção.
+const EMPRESA_WHATSAPP_NUMERO = process.env.EMPRESA_WHATSAPP_NUMERO || "5551998893033";
+
 // WhatsApp do especialista que recebe os dados de cada orçamento finalizado.
 const ESPECIALISTA_WHATSAPP = process.env.ESPECIALISTA_WHATSAPP || "5551985025102";
 
@@ -1651,9 +1660,17 @@ async function rotinaBuscarLeads({ db, queryText, segmento, maxResults, origem }
 function montarEmailApresentacao(nomeLead) {
   const saudacao = nomeLead ? `Olá, equipe ${nomeLead}!` : "Olá!";
   const subject = "LCS Terceirização — limpeza, portaria e zeladoria";
+  const linkWhatsapp = `https://wa.me/${EMPRESA_WHATSAPP_NUMERO}?text=${encodeURIComponent(
+    "Olá! Recebi o email da LCS Terceirização e gostaria de saber mais."
+  )}`;
   // Copy simples de propósito — ajuste o texto abaixo à vontade.
   const html = `
     <div style="font-family: sans-serif; font-size: 15px; color: #222; line-height: 1.5;">
+      ${
+        EMPRESA_LOGO_URL
+          ? `<img src="${EMPRESA_LOGO_URL}" alt="LCS Terceirização" style="max-width: 180px; margin-bottom: 16px;" />`
+          : ""
+      }
       <p>${saudacao}</p>
       <p>
         Somos a <strong>LCS Terceirização</strong>, de Porto Alegre, e atuamos há mais de 10 anos
@@ -1676,9 +1693,16 @@ function montarEmailApresentacao(nomeLead) {
             : ""
         }
       </p>
+      <p style="margin: 20px 0;">
+        <a
+          href="${linkWhatsapp}"
+          style="background: #25D366; color: #ffffff; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-weight: bold; display: inline-block;"
+        >
+          💬 Falar no WhatsApp agora
+        </a>
+      </p>
       <p>
-        Em breve entraremos em contato também pelo WhatsApp — mas se preferir, pode responder
-        direto este email.
+        Ou, se preferir, pode responder direto este email.
       </p>
       <p>Abraço,<br/>Equipe LCS Terceirização</p>
     </div>
