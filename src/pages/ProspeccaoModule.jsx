@@ -105,6 +105,29 @@ function formatarData(timestamp) {
   });
 }
 
+// Mostra a origem do último envio que aconteceu com o lead (WhatsApp tem
+// prioridade sobre email, porque é o passo mais recente do funil).
+function OrigemBadge({ lead }) {
+  const origem = lead.origemWhatsapp || lead.origemEmail || lead.origemBusca;
+  if (!origem) return <span>—</span>;
+  const ehCron = origem === "cron";
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "3px 10px",
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 700,
+        background: ehCron ? "#F1EAFB" : "#FFF6E5",
+        color: ehCron ? "#5B2E9E" : "#8A5A00",
+      }}
+    >
+      {ehCron ? "🤖 Automático" : "👤 Manual"}
+    </span>
+  );
+}
+
 function TabelaLeads() {
   const { leads, loading, error } = useLeadsProspeccao();
 
@@ -121,6 +144,7 @@ function TabelaLeads() {
           <tr>
             <th style={styles.th}>Nome</th>
             <th style={styles.th}>Status</th>
+            <th style={styles.th}>Origem</th>
             <th style={styles.th}>Interagiu?</th>
             <th style={styles.th}>Email</th>
             <th style={styles.th}>Telefone</th>
@@ -133,6 +157,9 @@ function TabelaLeads() {
               <td style={styles.td}>{lead.nome || "—"}</td>
               <td style={styles.td}>
                 <StatusBadge status={lead.status} />
+              </td>
+              <td style={styles.td}>
+                <OrigemBadge lead={lead} />
               </td>
               <td style={styles.td}>{lead.interagiuEmail ? "Sim" : "—"}</td>
               <td style={styles.td}>{lead.email || "—"}</td>
@@ -166,6 +193,7 @@ export default function ProspeccaoModule() {
         query: segmentoAtual.query,
         segmento: segmentoAtual.valor,
         maxResults: 20,
+        origem: "manual",
       });
       setResultBusca(data);
       setStatusBusca("done");
@@ -179,7 +207,7 @@ export default function ProspeccaoModule() {
     setStatusEmail("loading");
     setErro("");
     try {
-      const data = await chamarProspeccao("prospeccao_email");
+      const data = await chamarProspeccao("prospeccao_email", { origem: "manual" });
       setResultEmail(data);
       setStatusEmail("done");
     } catch (e) {
@@ -192,7 +220,7 @@ export default function ProspeccaoModule() {
     setStatusWhats("loading");
     setErro("");
     try {
-      const data = await chamarProspeccao("prospeccao_whatsapp");
+      const data = await chamarProspeccao("prospeccao_whatsapp", { origem: "manual" });
       setResultWhats(data);
       setStatusWhats("done");
     } catch (e) {
