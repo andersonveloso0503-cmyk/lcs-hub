@@ -5,6 +5,7 @@ import {
   Users,
   Search,
   FileText,
+  UserPlus,
   LogOut,
 } from "lucide-react";
 import { useAuth } from "../context/useAuth";
@@ -14,6 +15,7 @@ const NAV_ITEMS = [
   { to: "/instagram", label: "Instagram", icon: Instagram },
   { to: "/google-ads", label: "Google Ads", icon: Search },
   { to: "/blog", label: "Blog", icon: FileText },
+  { to: "/prospeccao", label: "Prospecção", icon: UserPlus },
 ];
 export default function AppLayout() {
   const { logout } = useAuth();
