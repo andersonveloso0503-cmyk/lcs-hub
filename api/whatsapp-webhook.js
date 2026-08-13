@@ -2152,18 +2152,44 @@ export default async function handler(req, res) {
           );
           await new Promise((r) => setTimeout(r, 800));
 
-          if (messageDoc.fileUrl) {
+          // Tenta encaminhar o arquivo. Primeiro tenta pela URL pública (Blob);
+          // se não tiver, busca direto da Evolution API e encaminha pela base64.
+          let mediaUrlParaFiscal = messageDoc.fileUrl || null;
+
+          if (!mediaUrlParaFiscal) {
+            // Tenta baixar o arquivo diretamente da Evolution pra reenviar
+            try {
+              const mediaData = await fetchMediaBase64(data.key?.id);
+              if (mediaData?.base64) {
+                mediaUrlParaFiscal = await uploadMediaToBlob(
+                  mediaData.base64,
+                  mediaData.mimetype || "application/octet-stream",
+                  messageDoc.fileName?.split(".").pop() || "pdf"
+                );
+              }
+            } catch (blobErr) {
+              console.error("Erro ao buscar mídia pro fiscal:", blobErr);
+            }
+          }
+
+          if (mediaUrlParaFiscal) {
             await fetch(`${EVOLUTION_BASE_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
               method: "POST",
               headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
               body: JSON.stringify({
                 number: normalizePhoneForSend(FISCAL_WHATSAPP),
                 mediatype: "document",
-                media: messageDoc.fileUrl,
+                media: mediaUrlParaFiscal,
                 fileName: messageDoc.fileName || "documento.pdf",
                 caption: `📄 ${messageDoc.fileName || "documento"}`,
               }),
             });
+          } else {
+            // Último recurso — avisa que chegou mas não conseguiu encaminhar o arquivo
+            await sendText(
+              normalizePhoneForSend(FISCAL_WHATSAPP),
+              `⚠️ Não foi possível encaminhar o arquivo automaticamente. Verifique o Inbox do CRM pra baixar manualmente.`
+            );
           }
         } catch (fiscalErr) {
           console.error("Erro ao encaminhar documento pro fiscal:", fiscalErr);
