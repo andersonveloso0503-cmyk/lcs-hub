@@ -1660,6 +1660,15 @@ async function logActionHistory(db, appliedList) {
  * que desativar sem depender do Supermetrics (que trava sem assinatura).
  */
 async function fetchConversionActionStats(accessToken, days = 90) {
+  // O operador DURING só aceita períodos fixos pré-definidos do Google Ads
+  // (LAST_7_DAYS, LAST_30_DAYS...) — "LAST_90_DAYS" não existe e dá erro
+  // INVALID_VALUE_WITH_DURING_OPERATOR. Pra qualquer número de dias,
+  // calculamos as datas exatas e usamos BETWEEN.
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+
   const query = `
     SELECT
       conversion_action.id,
@@ -1670,7 +1679,7 @@ async function fetchConversionActionStats(accessToken, days = 90) {
       conversion_action.primary_for_goal,
       metrics.all_conversions
     FROM conversion_action
-    WHERE segments.date DURING LAST_${days}_DAYS
+    WHERE segments.date BETWEEN '${fmt(start)}' AND '${fmt(end)}'
   `;
 
   const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
