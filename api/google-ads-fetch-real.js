@@ -1623,7 +1623,7 @@ async function createAbTestAds(accessToken, campaignId, serviceLabel, finalUrl) 
 // add_keyword, create_ad) ainda aparecem no histórico para
 // acompanhamento, mas sem botão de desfazer — a reversão deles ainda não
 // foi construída.
-const REVERTIBLE_TYPES = new Set(["pause_campaign", "negative_keyword", "budget_reduction"]);
+const REVERTIBLE_TYPES = new Set(["pause_campaign", "negative_keyword", "budget_reduction", "conversion_action_removed"]);
 
 /**
  * Salva cada ação aplicada pela otimização automática numa coleção própria
@@ -1654,6 +1654,82 @@ async function logActionHistory(db, appliedList) {
 }
 
 /**
+ * 4.4 — Busca todas as ações de conversão da conta e quanto cada uma
+ * converteu nos últimos N dias. Usado pra "Limpeza de Conversões": mostra
+ * quais das ações cadastradas nunca disparam de verdade, pra decidir o
+ * que desativar sem depender do Supermetrics (que trava sem assinatura).
+ */
+async function fetchConversionActionStats(accessToken, days = 90) {
+  const query = `
+    SELECT
+      conversion_action.id,
+      conversion_action.name,
+      conversion_action.status,
+      conversion_action.type,
+      conversion_action.category,
+      conversion_action.primary_for_goal,
+      metrics.all_conversions
+    FROM conversion_action
+    WHERE segments.date DURING LAST_${days}_DAYS
+  `;
+
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Google Ads API retornou erro ${res.status}: ${text.slice(0, 500)}`);
+
+  const batches = JSON.parse(text);
+  const rows = [];
+  for (const batch of batches) {
+    if (batch.results) rows.push(...batch.results);
+  }
+
+  return rows.map((row) => {
+    const ca = row.conversionAction || {};
+    const m = row.metrics || {};
+    return {
+      id: ca.id,
+      name: ca.name,
+      status: ca.status,
+      type: ca.type,
+      category: ca.category,
+      primaryForGoal: !!ca.primaryForGoal,
+      allConversions: parseFloat(m.allConversions || 0),
+    };
+  });
+}
+
+/**
+ * Desativa uma ação de conversão (status REMOVED). Isso é reversível — a
+ * Google Ads mantém o histórico e a ação pode voltar pra ENABLED.
+ */
+async function removeConversionAction(accessToken, conversionActionId) {
+  const resourceName = `customers/${CUSTOMER_ID}/conversionActions/${conversionActionId}`;
+  const body = {
+    operations: [{ update: { resourceName, status: "REMOVED" }, updateMask: "status" }],
+  };
+  return runMutation(accessToken, "conversionActions:mutate", body);
+}
+
+/** Reverte a desativação, voltando a ação de conversão pra ENABLED. */
+async function resumeConversionAction(accessToken, conversionActionId) {
+  const resourceName = `customers/${CUSTOMER_ID}/conversionActions/${conversionActionId}`;
+  const body = {
+    operations: [{ update: { resourceName, status: "ENABLED" }, updateMask: "status" }],
+  };
+  return runMutation(accessToken, "conversionActions:mutate", body);
+}
+
+/**
  * Desfaz uma ação previamente aplicada e registrada no histórico,
  * usando os dados que foram guardados no momento em que ela rodou.
  */
@@ -1673,6 +1749,9 @@ async function revertAction(accessToken, db, historyId) {
   } else if (item.type === "budget_reduction") {
     if (!item.budget_resource_name) throw new Error("Orçamento sem referência salva — ajuste manualmente no Google Ads.");
     await updateCampaignBudget(accessToken, item.budget_resource_name, item.old_amount);
+  } else if (item.type === "conversion_action_removed") {
+    if (!item.conversion_action_id) throw new Error("Sem o ID da ação de conversão salvo — reative manualmente no Google Ads.");
+    await resumeConversionAction(accessToken, item.conversion_action_id);
   }
 
   await ref.update({ reverted: true, reverted_at: new Date().toISOString() });
@@ -2334,6 +2413,8 @@ export default async function handler(req, res) {
     action === "update_budget" ||
     action === "run_auto_optimizations" ||
     action === "revert_action" ||
+    action === "preview_conversion_cleanup" ||
+    action === "cleanup_conversion_actions" ||
     action === "generate_ad_copy" ||
     action === "create_ad" ||
     action === "suggest_keywords" ||
@@ -2431,6 +2512,44 @@ export default async function handler(req, res) {
         if (!history_id) return res.status(400).json({ error: "history_id é obrigatório." });
         const result = await revertAction(accessToken, getAdminDb(), history_id);
         return res.status(200).json({ ok: true, ...result });
+      }
+
+      // Mostra só a lista de candidatas a desativar — nada é alterado na
+      // conta ainda. O painel usa isso pra montar a tela de confirmação.
+      if (action === "preview_conversion_cleanup") {
+        const stats = await fetchConversionActionStats(accessToken, 90);
+        const candidates = stats.filter((c) => c.status === "ENABLED" && c.allConversions === 0);
+        const keeping = stats.filter((c) => c.status === "ENABLED" && c.allConversions > 0);
+        return res.status(200).json({ ok: true, candidates, keeping, total: stats.length });
+      }
+
+      // Desativa de fato só as ações de conversão cujos IDs vieram no body
+      // (o painel manda só as que o usuário marcou na tela de confirmação —
+      // nunca a lista inteira sem revisão humana).
+      if (action === "cleanup_conversion_actions") {
+        const { ids } = req.body;
+        if (!Array.isArray(ids) || ids.length === 0) {
+          return res.status(400).json({ error: "ids é obrigatório e precisa ser uma lista não vazia." });
+        }
+        const stats = await fetchConversionActionStats(accessToken, 90);
+        const byId = Object.fromEntries(stats.map((c) => [String(c.id), c]));
+        const applied = [];
+        const errors = [];
+        for (const id of ids) {
+          const info = byId[String(id)];
+          try {
+            await removeConversionAction(accessToken, id);
+            applied.push({
+              type: "conversion_action_removed",
+              campaign: info?.name || `Ação ${id}`,
+              conversion_action_id: String(id),
+            });
+          } catch (err) {
+            errors.push({ id, message: err.message });
+          }
+        }
+        await logActionHistory(getAdminDb(), applied);
+        return res.status(200).json({ ok: true, removed: applied.length, applied, errors });
       }
 
       if (action === "suggest_hourly_bids") {
