@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { History, Undo2, PauseCircle, Ban, CircleDollarSign, SlidersHorizontal, Clock, Monitor, Globe, PlusCircle, Sparkles, Wrench } from "lucide-react";
+import { History, Undo2, PauseCircle, Ban, CircleDollarSign, SlidersHorizontal, Clock, Monitor, Globe, PlusCircle, Sparkles, Wrench, Trash2 } from "lucide-react";
 import { collection, query, orderBy, limit, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase/config";
 
@@ -8,6 +8,7 @@ import { db } from "../firebase/config";
 const ACTION_META = {
   pause_campaign: { icon: PauseCircle, color: "#C62828", label: (a) => `Campanha "${a.campaign}" foi pausada (nota baixa)` },
   improve_attempt: { icon: Wrench, color: "#EF6C00", label: (a) => `"${a.campaign}" com nota baixa (${a.lcs_score}) — tentando melhorar antes de pausar (dia ${a.streak}/${a.grace_days})` },
+  conversion_action_removed: { icon: Trash2, color: "#6A1B9A", label: (a) => `Ação de conversão "${a.campaign}" desativada (sem uso em 90 dias)` },
   negative_keyword: { icon: Ban, color: "#EF6C00", label: (a) => `Bloqueou buscas por "${a.term}" em "${a.campaign}"` },
   budget_reduction: { icon: CircleDollarSign, color: "#6A1B9A", label: (a) => `Orçamento de "${a.campaign}" reduzido: R$${a.old_amount?.toFixed(2)} → R$${a.new_amount?.toFixed(2)}` },
   bidding_strategy: { icon: SlidersHorizontal, color: "var(--teal)", label: (a) => `Estratégia de lance de "${a.campaign}" trocada para ${a.to === "MAXIMIZE_CONVERSIONS" ? "Maximizar Conversões" : "Maximizar Cliques"}` },
