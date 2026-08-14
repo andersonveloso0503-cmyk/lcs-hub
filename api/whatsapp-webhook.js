@@ -1422,6 +1422,27 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
 // Quanto tempo (em ms) depois de o bot mandar uma mensagem ainda consideramos
 // que um evento "fromMe" recebido é só o eco da própria mensagem do bot
 // voltando pelo webhook, e não um atendente digitando na mão.
+// Palavras-chave que disparam sugestão de resposta pro dono, independente
+// do status do contato. Quando detectadas, a IA lê a mensagem e sugere
+// como responder.
+const GATILHOS_SUGESTAO = [
+  "orçamento", "orcar", "orcamento", "preço", "preco", "valor", "quanto custa",
+  "quanto cobr", "proposta", "contrato", "contratar", "terceiriz",
+  "limpeza", "portaria", "zeladoria", "zelador", "auxiliar",
+  "serviço", "servico", "funcionario", "funcionário",
+  "interesse", "precisando", "preciso", "precisa", "quero", "queria",
+  "disponib", "atend", "informaç", "informac",
+];
+
+function temGatilhoSugestao(text) {
+  if (!text) return false;
+  const t = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return GATILHOS_SUGESTAO.some((g) => t.includes(g));
+}
+
 const DONO_WHATSAPP = process.env.DONO_WHATSAPP || "5551998893033";
 
 /**
@@ -2266,17 +2287,19 @@ export default async function handler(req, res) {
         const botSkipped = BOT_SKIP_STATUSES.includes(currentStatus);
 
         if (botSkipped && messageDoc.type === "text") {
-          // Cliente/contrato — bot fica em silêncio, mas gera sugestão de
-          // resposta pro dono pra ajudar no atendimento humano.
-          try {
-            await gerarSugestaoResposta({
-              phone,
-              pushName,
-              text: messageDoc.text,
-              contactStatus: currentStatus,
-            });
-          } catch (sugestaoErr) {
-            console.error("Erro ao gerar sugestão de resposta:", sugestaoErr);
+          // Cliente/contrato — bot fica em silêncio. Gera sugestão só se
+          // a mensagem contiver palavras de interesse comercial.
+          if (temGatilhoSugestao(messageDoc.text)) {
+            try {
+              await gerarSugestaoResposta({
+                phone,
+                pushName,
+                text: messageDoc.text,
+                contactStatus: currentStatus,
+              });
+            } catch (sugestaoErr) {
+              console.error("Erro ao gerar sugestão de resposta:", sugestaoErr);
+            }
           }
         }
 
@@ -2320,6 +2343,21 @@ export default async function handler(req, res) {
 
           if (!tratadoPelaDuvida) {
             await runBotFlow({ db, phone, pushName, messageDoc });
+          }
+
+          // Qualquer contato (não só cliente/contrato) — gera sugestão se
+          // a mensagem tiver palavras de interesse comercial.
+          if (messageDoc.type === "text" && temGatilhoSugestao(messageDoc.text)) {
+            try {
+              await gerarSugestaoResposta({
+                phone,
+                pushName,
+                text: messageDoc.text,
+                contactStatus: currentStatus,
+              });
+            } catch (sugestaoErr) {
+              console.error("Erro ao gerar sugestão (gatilho):", sugestaoErr);
+            }
           }
         }
       } catch (botErr) {
