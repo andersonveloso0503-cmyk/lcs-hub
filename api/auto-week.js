@@ -1,4 +1,3 @@
-// testte
 // /api/auto-week.js
 //
 // Cron que roda todo dia às 10h UTC (07h Brasília) e faz TRÊS coisas
