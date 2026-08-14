@@ -1422,7 +1422,54 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
 // Quanto tempo (em ms) depois de o bot mandar uma mensagem ainda consideramos
 // que um evento "fromMe" recebido é só o eco da própria mensagem do bot
 // voltando pelo webhook, e não um atendente digitando na mão.
-const BOT_ECHO_WINDOW_MS = 10000;
+const DONO_WHATSAPP = process.env.DONO_WHATSAPP || "5551998893033";
+
+/**
+ * Gera uma sugestão de resposta via Claude e envia pro WhatsApp do dono,
+ * quando um cliente/contrato manda mensagem e vai pro atendimento humano.
+ */
+async function gerarSugestaoResposta({ phone, pushName, text, contactStatus }) {
+  if (!text || text.trim().length < 3) return; // ignora mensagens vazias/curtas
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 400,
+        messages: [
+          {
+            role: "user",
+            content:
+              `Você é um assistente da LCS Terceirização, empresa de terceirização (limpeza, portaria, zeladoria) em Porto Alegre/RS.\n\n` +
+              `Um ${contactStatus === "contrato" ? "cliente com contrato ativo" : "cliente"} chamado "${pushName || phone}" mandou esta mensagem:\n\n` +
+              `"${text}"\n\n` +
+              `Sugira uma resposta profissional, cordial e direta pra enviar pra ele. ` +
+              `Máximo 4 linhas. Não use markdown, não use asteriscos. Só o texto da resposta mesmo.`,
+          },
+        ],
+      }),
+    });
+
+    const data = await res.json();
+    const sugestao = data?.content?.find((c) => c.type === "text")?.text;
+    if (!sugestao) return;
+
+    const msgParaDono =
+      `💡 *Sugestão de resposta para ${pushName || phone}*\n\n` +
+      `Mensagem dele: "${text.slice(0, 120)}${text.length > 120 ? "..." : ""}"\n\n` +
+      `📝 Sugestão:\n${sugestao}`;
+
+    await sendText(normalizePhoneForSend(DONO_WHATSAPP), msgParaDono);
+  } catch (err) {
+    console.error("Erro ao gerar sugestão de resposta:", err);
+  }
+}
 
 /**
  * Roda para toda mensagem ENVIADA pela LCS (fromMe: true). Se não for o eco
@@ -2217,6 +2264,21 @@ export default async function handler(req, res) {
         const contact = await findContactByPhone(db, phone);
         const currentStatus = contact?.status || "";
         const botSkipped = BOT_SKIP_STATUSES.includes(currentStatus);
+
+        if (botSkipped && messageDoc.type === "text") {
+          // Cliente/contrato — bot fica em silêncio, mas gera sugestão de
+          // resposta pro dono pra ajudar no atendimento humano.
+          try {
+            await gerarSugestaoResposta({
+              phone,
+              pushName,
+              text: messageDoc.text,
+              contactStatus: currentStatus,
+            });
+          } catch (sugestaoErr) {
+            console.error("Erro ao gerar sugestão de resposta:", sugestaoErr);
+          }
+        }
 
         if (!botSkipped) {
           // Atualiza ultimaMensagemClienteEm em qualquer orçamento aberto desse cliente
