@@ -140,18 +140,18 @@ async function uploadToBlob(buffer, filename) {
 
 // ── Passos de criação da campanha ────────────────────────────────────────
 
-async function createCampaign(name) {
+async function createCampaign(name, dailyBudgetCentavos) {
   const data = await graphPost(`${AD_ACCOUNT_ID}/campaigns`, {
     name,
     objective: "OUTCOME_ENGAGEMENT",
     status: "PAUSED",
     special_ad_categories: "[]",
-    is_adset_budget_sharing_enabled: "False",
+    daily_budget: String(dailyBudgetCentavos),
   });
   return data.id;
 }
 
-async function createAdSet(campaignId, name, dailyBudgetCentavos, interests) {
+async function createAdSet(campaignId, name, interests) {
   const targeting = {
     geo_locations: {
       cities: [{ key: "1729043", radius: 40, distance_unit: "kilometer" }], // Porto Alegre
@@ -165,7 +165,6 @@ async function createAdSet(campaignId, name, dailyBudgetCentavos, interests) {
   const data = await graphPost(`${AD_ACCOUNT_ID}/adsets`, {
     name,
     campaign_id: campaignId,
-    daily_budget: String(dailyBudgetCentavos),
     billing_event: "IMPRESSIONS",
     optimization_goal: "CONVERSATIONS",
     destination_type: "WHATSAPP",
@@ -216,13 +215,8 @@ async function buildCampaignForAudience(audienceKey) {
   const imageBuffer = await generateAdImage(audience.imageService, audience.headline, audience.subtext);
   const blobUrl = await uploadToBlob(imageBuffer, `meta-ads/${audienceKey}-${Date.now()}.png`);
 
-  const campaignId = await createCampaign(audience.campaignName);
-  const adsetId = await createAdSet(
-    campaignId,
-    `${audience.campaignName} - Adset`,
-    audience.dailyBudgetCentavos,
-    audience.interests
-  );
+  const campaignId = await createCampaign(audience.campaignName, audience.dailyBudgetCentavos);
+  const adsetId = await createAdSet(campaignId, `${audience.campaignName} - Adset`, audience.interests);
   const creativeId = await createAdCreative(`${audience.campaignName} - Criativo`, blobUrl, audience.message);
   const adId = await createAd(`${audience.campaignName} - Anúncio`, adsetId, creativeId);
 
