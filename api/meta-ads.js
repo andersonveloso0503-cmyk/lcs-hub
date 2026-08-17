@@ -147,6 +147,7 @@ async function createCampaign(name, dailyBudgetCentavos) {
     status: "PAUSED",
     special_ad_categories: "[]",
     daily_budget: String(dailyBudgetCentavos),
+    bid_strategy: "LOWEST_COST_WITHOUT_CAP",
   });
   return data.id;
 }
@@ -168,7 +169,6 @@ async function createAdSet(campaignId, name, interests) {
     billing_event: "IMPRESSIONS",
     optimization_goal: "CONVERSATIONS",
     destination_type: "WHATSAPP",
-    bid_strategy: "LOWEST_COST_WITHOUT_CAP",
     targeting: JSON.stringify(targeting),
     status: "PAUSED",
   });
