@@ -133,23 +133,6 @@ async function uploadToBlob(buffer, filename) {
   return blob.url;
 }
 
-// Sobe a imagem diretamente pro Meta (não pro Blob) — o anúncio precisa do
-// image_hash retornado por /act_X/adimages, não de uma URL externa.
-async function uploadImageToMeta(imageUrl) {
-  const url = `${GRAPH_BASE}/${AD_ACCOUNT_ID}/adimages`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ url: imageUrl, access_token: ACCESS_TOKEN }),
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(`Erro ao subir imagem pro Meta: ${data.error.message}`);
-  const images = data.images || {};
-  const first = Object.values(images)[0];
-  if (!first?.hash) throw new Error(`Resposta inesperada do upload de imagem: ${JSON.stringify(data)}`);
-  return first.hash;
-}
-
 // ── Passos de criação da campanha ────────────────────────────────────────
 
 async function createCampaign(name) {
@@ -187,13 +170,13 @@ async function createAdSet(campaignId, name, dailyBudgetCentavos, interests) {
   return data.id;
 }
 
-async function createAdCreative(name, imageHash, message) {
+async function createAdCreative(name, imageUrl, message) {
   const objectStorySpec = {
     page_id: PAGE_ID,
     link_data: {
       message,
       link: `https://wa.me/${WHATSAPP_NUMERO}`,
-      image_hash: imageHash,
+      picture: imageUrl,
       call_to_action: {
         type: "WHATSAPP_MESSAGE",
         value: { link: `https://wa.me/${WHATSAPP_NUMERO}` },
@@ -226,7 +209,6 @@ async function buildCampaignForAudience(audienceKey) {
 
   const imageBuffer = await generateAdImage(audience.imageService, audience.headline, audience.subtext);
   const blobUrl = await uploadToBlob(imageBuffer, `meta-ads/${audienceKey}-${Date.now()}.png`);
-  const imageHash = await uploadImageToMeta(blobUrl);
 
   const campaignId = await createCampaign(audience.campaignName);
   const adsetId = await createAdSet(
@@ -235,7 +217,7 @@ async function buildCampaignForAudience(audienceKey) {
     audience.dailyBudgetCentavos,
     audience.interests
   );
-  const creativeId = await createAdCreative(`${audience.campaignName} - Criativo`, imageHash, audience.message);
+  const creativeId = await createAdCreative(`${audience.campaignName} - Criativo`, blobUrl, audience.message);
   const adId = await createAd(`${audience.campaignName} - Anúncio`, adsetId, creativeId);
 
   return { campaignId, adsetId, creativeId, adId, imageUrl: blobUrl, audience: audienceKey };
