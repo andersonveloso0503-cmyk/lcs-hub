@@ -73,7 +73,11 @@ async function graphPost(path, params) {
   });
   const data = await res.json();
   if (data.error) {
-    throw new Error(`Graph API erro (${path}): ${data.error.message}`);
+    const e = data.error;
+    const detail = [e.message, e.error_user_msg, e.error_user_title, e.error_subcode]
+      .filter(Boolean)
+      .join(" | ");
+    throw new Error(`Graph API erro (${path}): ${detail}`);
   }
   return data;
 }
