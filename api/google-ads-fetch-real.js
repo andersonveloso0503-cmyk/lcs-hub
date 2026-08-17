@@ -17,7 +17,7 @@
 // de curta duração a cada execução — não precisa de login manual depois
 // de configurado.
 
-import { getAdminDb } from "./firebaseAdmin.js";
+import { getAdminDb } from "../lib/firebaseAdmin.js";
 
 const GOOGLE_ADS_API_VERSION = "v24";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
