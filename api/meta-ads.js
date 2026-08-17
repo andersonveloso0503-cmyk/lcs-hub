@@ -114,7 +114,7 @@ Style: clean, editorial, professional, high contrast, square format, suitable fo
       n: 1,
       size: "1024x1024",
       quality: "medium",
-      output_format: "b64_json",
+      output_format: "png",
     }),
   });
 
