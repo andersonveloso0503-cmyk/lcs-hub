@@ -26,7 +26,8 @@ import { put } from "@vercel/blob";
 const FACEBOOK_GRAPH_VERSION = "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}`;
 const ACCESS_TOKEN = process.env.FACEBOOK_PAGE_ACCESS_TOKEN || "";
-const AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID || "act_234677774477915";
+const AD_ACCOUNT_ID_RAW = process.env.META_AD_ACCOUNT_ID || "act_234677774477915";
+const AD_ACCOUNT_ID = AD_ACCOUNT_ID_RAW.startsWith("act_") ? AD_ACCOUNT_ID_RAW : `act_${AD_ACCOUNT_ID_RAW}`;
 const PAGE_ID = process.env.FACEBOOK_PAGE_ID || "";
 const WHATSAPP_NUMERO = process.env.EMPRESA_WHATSAPP_NUMERO || "5551998893033";
 
