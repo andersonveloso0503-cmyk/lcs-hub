@@ -146,7 +146,7 @@ async function createCampaign(name) {
     objective: "OUTCOME_ENGAGEMENT",
     status: "PAUSED",
     special_ad_categories: "[]",
-    is_adset_budget_sharing_enabled: "false",
+    is_adset_budget_sharing_enabled: "False",
   });
   return data.id;
 }
