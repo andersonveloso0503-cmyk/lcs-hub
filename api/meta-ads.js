@@ -36,7 +36,7 @@ const WHATSAPP_NUMERO = process.env.EMPRESA_WHATSAPP_NUMERO || "5551998893033";
 const AUDIENCES = {
   condominios: {
     campaignName: "LCS - Condomínios - Leads WhatsApp",
-    dailyBudgetCentavos: 500, // R$5,00/dia
+    dailyBudgetCentavos: 1000, // R$10,00/dia
     message:
       "Síndico, cansado de dor de cabeça com terceirizada de portaria e limpeza? A LCS assume tudo isso pra você. Fala com a gente no WhatsApp.",
     headline: "Gestão condominial sem dor de cabeça",
@@ -49,7 +49,7 @@ const AUDIENCES = {
   },
   empresas: {
     campaignName: "LCS - Empresas - Leads WhatsApp",
-    dailyBudgetCentavos: 500, // R$5,00/dia
+    dailyBudgetCentavos: 1000, // R$10,00/dia
     message:
       "Terceirizar limpeza, portaria e manutenção da sua empresa com quem entende do assunto há mais de 10 anos. Fala com a gente no WhatsApp.",
     headline: "Facilities da sua empresa, resolvido",
