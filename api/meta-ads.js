@@ -43,7 +43,7 @@ const AUDIENCES = {
     subtext: "Portaria, limpeza e zeladoria numa empresa só",
     interests: [
       { id: "6003077334693", name: "Condomínio fechado (imóveis)" },
-      { id: "6014327439518", name: "Condominioweb.com" },
+      { id: "6788101567252", name: "Property listings and web portals" },
     ],
     imageService: "prédio residencial moderno, portaria com segurança uniformizado",
   },
