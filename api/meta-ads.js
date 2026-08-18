@@ -169,6 +169,7 @@ async function createAdSet(campaignId, name, interests) {
     billing_event: "IMPRESSIONS",
     optimization_goal: "CONVERSATIONS",
     destination_type: "WHATSAPP",
+    promoted_object: JSON.stringify({ page_id: PAGE_ID }),
     targeting: JSON.stringify(targeting),
     status: "PAUSED",
   });
