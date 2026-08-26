@@ -1523,6 +1523,253 @@ async function gerarSugestaoResposta({ phone, pushName, text, contactStatus }) {
   }
 }
 
+// ============================================================================
+// AGENTE FINANCEIRO — registro de gastos via WhatsApp (mensagem de texto)
+// ============================================================================
+// Só responde a mensagens vindas do número pessoal do Anderson
+// (ADMIN_FINANCEIRO_WHATSAPP), configurado como variável de ambiente na
+// Vercel. Mensagens desse número NUNCA passam pelo menu de atendimento ao
+// cliente (Clientes/Funcionários/Orçamento/etc) — são tratadas à parte, no
+// topo do handler, antes de qualquer outra lógica.
+//
+// Fluxo:
+//   1. Anderson manda algo como "gastei 50 no mercado" ou "120 combustível
+//      da van".
+//   2. A IA (Claude Haiku) extrai valor, descrição, categoria e, se der pra
+//      identificar, a empresa (LCS ou Van Service).
+//   3. Se a empresa não ficou clara, o bot pergunta e guarda o gasto como
+//      "pendente" (Firestore) até ele responder "lcs" ou "van".
+//   4. Gasto confirmado é salvo em financeiro_lancamentos e o bot responde
+//      com a confirmação + total do mês daquela empresa.
+//   5. "resumo", "resumo lcs" ou "resumo van" mostram o total do mês atual.
+// ============================================================================
+
+const ADMIN_FINANCEIRO_WHATSAPP = process.env.ADMIN_FINANCEIRO_WHATSAPP || "";
+
+const CATEGORIAS_FINANCEIRO = [
+  "Combustível",
+  "Manutenção de veículo",
+  "Materiais e insumos",
+  "Uniformes e EPI",
+  "Salários e encargos",
+  "Aluguel",
+  "Impostos e taxas",
+  "Marketing e publicidade",
+  "Alimentação",
+  "Telefone e internet",
+  "Serviços terceirizados",
+  "Outros",
+];
+
+const EMPRESAS_FINANCEIRO = {
+  LCS: "LCS Terceirização",
+  VAN: "Van Service",
+};
+
+function formatarMoeda(valor) {
+  return (Number(valor) || 0).toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+}
+
+function normalizarRespostaEmpresa(texto) {
+  const t = normalize(texto || "").trim();
+  if (t === "lcs" || t.includes("lcs")) return "LCS";
+  if (t === "van" || t.includes("van")) return "VAN";
+  return null;
+}
+
+// Chama a Claude Haiku pra extrair os dados do gasto a partir do texto livre
+// mandado pelo Anderson. Responde só JSON (reaproveita extrairJsonDaResposta,
+// já usado em outros pontos deste arquivo, pra tolerar pequenas variações de
+// formatação da IA).
+async function parseGastoComIA(texto) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 300,
+      messages: [
+        {
+          role: "user",
+          content:
+            `Extraia os dados de um gasto financeiro a partir da mensagem abaixo, escrita em português informal, mandada pelo dono de duas empresas pelo WhatsApp.\n\n` +
+            `Mensagem: "${texto}"\n\n` +
+            `Empresas possíveis:\n` +
+            `- "LCS": empresa de terceirização — limpeza, portaria, zeladoria, condomínios.\n` +
+            `- "VAN": Van Service — transporte, van, motorista, passageiros.\n` +
+            `Só preencha "empresa" com "LCS" ou "VAN" se a mensagem mencionar claramente uma das duas (nome direto, ou palavras fortemente associadas, tipo "combustível da van" → VAN, "material de limpeza" → LCS). Se não der pra saber com segurança, use null.\n\n` +
+            `Categorias possíveis (escolha SEMPRE uma destas, a que melhor encaixa): ${CATEGORIAS_FINANCEIRO.join(", ")}.\n\n` +
+            `Responda APENAS com um JSON válido, sem markdown, sem texto antes ou depois, exatamente neste formato:\n` +
+            `{"valor": 50.00, "descricao": "mercado", "categoria": "Materiais e insumos", "empresa": null}\n\n` +
+            `Se a mensagem não tiver um valor numérico (em reais) identificável, responda apenas: {"erro": "sem_valor"}`,
+        },
+      ],
+    }),
+  });
+
+  const data = await res.json();
+  const textoResposta = data?.content?.find((c) => c.type === "text")?.text;
+  if (!textoResposta) throw new Error("IA não retornou resposta.");
+  return extrairJsonDaResposta(textoResposta);
+}
+
+// Soma os lançamentos do mês atual (America/Sao_Paulo) de uma empresa.
+async function totalDoMes(db, empresa) {
+  const agora = new Date();
+  const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1);
+
+  const snap = await getDocs(
+    query(
+      collection(db, "financeiro_lancamentos"),
+      where("empresa", "==", empresa),
+      where("criadoEm", ">=", inicioMes)
+    )
+  );
+
+  let total = 0;
+  snap.forEach((d) => {
+    total += Number(d.data().valor) || 0;
+  });
+  return total;
+}
+
+async function salvarLancamento(db, { phone, empresa, valor, descricao, categoria, textoOriginal }) {
+  await addDoc(collection(db, "financeiro_lancamentos"), {
+    empresa,
+    valor: Number(valor),
+    descricao: descricao || "",
+    categoria: categoria || "Outros",
+    textoOriginal: textoOriginal || "",
+    telefoneOrigem: phone,
+    criadoEm: serverTimestamp(),
+  });
+}
+
+async function gerarResumoFinanceiro(db, empresaFiltro) {
+  const empresas = empresaFiltro ? [empresaFiltro] : ["LCS", "VAN"];
+  const linhas = [];
+  for (const emp of empresas) {
+    const total = await totalDoMes(db, emp);
+    linhas.push(`${emp === "LCS" ? "🏢" : "🚐"} *${EMPRESAS_FINANCEIRO[emp]}*: ${formatarMoeda(total)}`);
+  }
+  const mesAno = new Date().toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  return `📊 *Resumo de ${mesAno}*\n\n${linhas.join("\n")}`;
+}
+
+async function handleFinanceiroMessage({ db, phone, pushName, text }) {
+  const textoLimpo = (text || "").trim();
+  if (!textoLimpo) return;
+
+  // Comando de resumo: "resumo", "resumo lcs", "resumo van"
+  if (/^resumo\b/i.test(normalize(textoLimpo))) {
+    const norm = normalize(textoLimpo);
+    const empresaFiltro = norm.includes("van") ? "VAN" : norm.includes("lcs") ? "LCS" : null;
+    const resumo = await gerarResumoFinanceiro(db, empresaFiltro);
+    await sendText(phone, resumo);
+    return;
+  }
+
+  const pendingRef = doc(db, "financeiro_pendente", phone);
+  const pendingSnap = await getDoc(pendingRef);
+
+  // Se tem um gasto pendente de confirmação de empresa, primeiro checa se
+  // essa mensagem é a resposta (lcs/van) ou um cancelamento.
+  if (pendingSnap.exists()) {
+    if (/^cancelar|cancela/i.test(normalize(textoLimpo))) {
+      await setDoc(pendingRef, { cancelado: true }, { merge: true });
+      await sendText(phone, "❌ Gasto cancelado.");
+      return;
+    }
+
+    const empresa = normalizarRespostaEmpresa(textoLimpo);
+    if (empresa) {
+      const pendente = pendingSnap.data();
+      await salvarLancamento(db, {
+        phone,
+        empresa,
+        valor: pendente.valor,
+        descricao: pendente.descricao,
+        categoria: pendente.categoria,
+        textoOriginal: pendente.textoOriginal,
+      });
+      await setDoc(pendingRef, { finalizado: true }, { merge: true });
+      const total = await totalDoMes(db, empresa);
+      await sendText(
+        phone,
+        `✅ Registrado!\n💰 ${formatarMoeda(pendente.valor)} — ${pendente.descricao || "sem descrição"}\n` +
+          `${empresa === "LCS" ? "🏢" : "🚐"} ${EMPRESAS_FINANCEIRO[empresa]} · 🏷️ ${pendente.categoria}\n\n` +
+          `📊 Total ${EMPRESAS_FINANCEIRO[empresa]} este mês: ${formatarMoeda(total)}`
+      );
+      return;
+    }
+
+    // Não é "lcs"/"van"/"cancelar" — trata como uma NOVA mensagem (não
+    // insiste perguntando de novo, pra não travar o Anderson num loop).
+  }
+
+  let parsed;
+  try {
+    parsed = await parseGastoComIA(textoLimpo);
+  } catch (err) {
+    console.error("Erro ao interpretar gasto com IA:", err);
+    await sendText(
+      phone,
+      "⚠️ Não consegui entender esse gasto. Tenta algo tipo: \"gastei 50 no mercado\" ou \"120 combustível da van\"."
+    );
+    return;
+  }
+
+  if (parsed?.erro === "sem_valor" || typeof parsed?.valor !== "number" || !parsed.valor) {
+    await sendText(
+      phone,
+      "⚠️ Não achei um valor em reais nessa mensagem. Manda algo tipo: \"gastei 50 no mercado\"."
+    );
+    return;
+  }
+
+  const categoria = CATEGORIAS_FINANCEIRO.includes(parsed.categoria) ? parsed.categoria : "Outros";
+  const empresa = parsed.empresa === "LCS" || parsed.empresa === "VAN" ? parsed.empresa : null;
+
+  if (!empresa) {
+    await setDoc(pendingRef, {
+      valor: parsed.valor,
+      descricao: parsed.descricao || "",
+      categoria,
+      textoOriginal: textoLimpo,
+      criadoEm: serverTimestamp(),
+    });
+    await sendText(
+      phone,
+      `💰 ${formatarMoeda(parsed.valor)} — ${parsed.descricao || "sem descrição"} (${categoria})\n\n` +
+        `Foi gasto da *LCS* ou da *Van Service*? Responde "lcs" ou "van".`
+    );
+    return;
+  }
+
+  await salvarLancamento(db, {
+    phone,
+    empresa,
+    valor: parsed.valor,
+    descricao: parsed.descricao,
+    categoria,
+    textoOriginal: textoLimpo,
+  });
+  const total = await totalDoMes(db, empresa);
+  await sendText(
+    phone,
+    `✅ Registrado!\n💰 ${formatarMoeda(parsed.valor)} — ${parsed.descricao || "sem descrição"}\n` +
+      `${empresa === "LCS" ? "🏢" : "🚐"} ${EMPRESAS_FINANCEIRO[empresa]} · 🏷️ ${categoria}\n\n` +
+      `📊 Total ${EMPRESAS_FINANCEIRO[empresa]} este mês: ${formatarMoeda(total)}`
+  );
+}
+
 /**
  * Roda para toda mensagem ENVIADA pela LCS (fromMe: true). Se não for o eco
  * de uma mensagem que o próprio bot mandou, entendemos que foi um atendente
@@ -2230,6 +2477,27 @@ export default async function handler(req, res) {
     await addDoc(collection(db, "whatsapp_messages"), messageDoc);
 
     if (!fromMe) {
+      // ------------------------------------------------------------------
+      // AGENTE FINANCEIRO: mensagens vindas do número pessoal do Anderson
+      // nunca entram no menu de atendimento ao cliente — são tratadas à
+      // parte e o webhook retorna aqui mesmo.
+      // ------------------------------------------------------------------
+      const phoneDigits = phone.replace(/\D/g, "");
+      const adminDigits = ADMIN_FINANCEIRO_WHATSAPP.replace(/\D/g, "");
+      if (adminDigits && phoneDigits === adminDigits && messageDoc.type === "text") {
+        try {
+          await handleFinanceiroMessage({ db, phone, pushName, text: messageDoc.text });
+        } catch (finErr) {
+          console.error("Erro no agente financeiro:", finErr);
+          try {
+            await sendText(phone, "⚠️ Deu um erro registrando esse gasto. Tenta de novo em instantes.");
+          } catch (_) {
+            // ignora falha ao avisar
+          }
+        }
+        return res.status(200).json({ ok: true, financeiro: true });
+      }
+
       // Encaminha qualquer PDF recebido pro fiscal operacional, independente
       // de o candidato ter passado pelo menu ou não.
       if (messageDoc.type === "document") {
