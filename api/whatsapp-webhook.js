@@ -35,6 +35,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  deleteDoc,
   increment,
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
@@ -1610,8 +1611,13 @@ function formatarMoeda(valor) {
 
 function normalizarRespostaEmpresa(texto) {
   const t = normalize(texto || "").trim();
-  if (t === "lcs" || t.includes("lcs")) return "LCS";
-  if (t === "van" || t.includes("van")) return "VAN";
+  // Estrito: só conta como resposta de confirmação se a mensagem inteira for
+  // "lcs" ou "van" (sem mais nada). Antes usava .includes(), o que fazia
+  // qualquer mensagem nova que contivesse essas letras em qualquer lugar
+  // (ex: "levantei", "quantos", etc.) fechar por engano um lançamento
+  // pendente antigo, com o valor/descrição errados.
+  if (t === "lcs") return "LCS";
+  if (t === "van") return "VAN";
   return null;
 }
 
@@ -1717,32 +1723,49 @@ async function handleFinanceiroMessage({ db, phone, pushName, text }) {
   const pendingRef = doc(db, "financeiro_pendente", phone);
   const pendingSnap = await getDoc(pendingRef);
 
-  // Se tem um gasto pendente de confirmação de empresa, primeiro checa se
-  // essa mensagem é a resposta (lcs/van) ou um cancelamento.
+  // Um pendente só é válido se: existir, não estiver marcado como já
+  // finalizado/cancelado (resquício de versões antigas do código, que só
+  // marcavam uma flag em vez de apagar o documento) e tiver menos de 2h.
+  // Isso evita que uma mensagem futura qualquer acabe "completando" por
+  // engano um gasto antigo que você já nem lembra mais.
+  let pendenteValido = null;
   if (pendingSnap.exists()) {
+    const dadosPendente = pendingSnap.data();
+    const criadoEm = dadosPendente.criadoEm?.toDate ? dadosPendente.criadoEm.toDate() : null;
+    const duasHorasMs = 2 * 60 * 60 * 1000;
+    const expirado = !criadoEm || Date.now() - criadoEm.getTime() > duasHorasMs;
+    if (!dadosPendente.finalizado && !dadosPendente.cancelado && !expirado) {
+      pendenteValido = dadosPendente;
+    } else if (expirado) {
+      await deleteDoc(pendingRef).catch(() => {});
+    }
+  }
+
+  // Se tem um gasto pendente válido de confirmação de empresa, primeiro
+  // checa se essa mensagem é a resposta (lcs/van) ou um cancelamento.
+  if (pendenteValido) {
     if (/^cancelar|cancela/i.test(normalize(textoLimpo))) {
-      await setDoc(pendingRef, { cancelado: true }, { merge: true });
+      await deleteDoc(pendingRef).catch(() => {});
       await sendText(phone, "❌ Gasto cancelado.");
       return;
     }
 
     const empresa = normalizarRespostaEmpresa(textoLimpo);
     if (empresa) {
-      const pendente = pendingSnap.data();
       await salvarLancamento(db, {
         phone,
         empresa,
-        valor: pendente.valor,
-        descricao: pendente.descricao,
-        categoria: pendente.categoria,
-        textoOriginal: pendente.textoOriginal,
+        valor: pendenteValido.valor,
+        descricao: pendenteValido.descricao,
+        categoria: pendenteValido.categoria,
+        textoOriginal: pendenteValido.textoOriginal,
       });
-      await setDoc(pendingRef, { finalizado: true }, { merge: true });
+      await deleteDoc(pendingRef).catch(() => {});
       const total = await totalDoMes(db, empresa);
       await sendText(
         phone,
-        `✅ Registrado!\n💰 ${formatarMoeda(pendente.valor)} — ${pendente.descricao || "sem descrição"}\n` +
-          `${empresa === "LCS" ? "🏢" : "🚐"} ${EMPRESAS_FINANCEIRO[empresa]} · 🏷️ ${pendente.categoria}\n\n` +
+        `✅ Registrado!\n💰 ${formatarMoeda(pendenteValido.valor)} — ${pendenteValido.descricao || "sem descrição"}\n` +
+          `${empresa === "LCS" ? "🏢" : "🚐"} ${EMPRESAS_FINANCEIRO[empresa]} · 🏷️ ${pendenteValido.categoria}\n\n` +
           `📊 Total ${EMPRESAS_FINANCEIRO[empresa]} este mês: ${formatarMoeda(total)}`
       );
       return;
