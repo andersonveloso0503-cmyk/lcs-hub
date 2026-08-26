@@ -1546,6 +1546,25 @@ async function gerarSugestaoResposta({ phone, pushName, text, contactStatus }) {
 
 const ADMIN_FINANCEIRO_WHATSAPP = process.env.ADMIN_FINANCEIRO_WHATSAPP || "";
 
+// Reduz um número de celular brasileiro a uma forma "canônica" (DDD + 8
+// dígitos, sem o código do país e sem o 9º dígito) pra poder comparar dois
+// números que representam o mesmo celular mas vieram formatados diferente —
+// ex: WhatsApp às vezes manda o remoteJid SEM o 9 (formato antigo), enquanto
+// a variável de ambiente foi salva COM o 9. Sem isso, uma comparação exata
+// (string === string) falha mesmo sendo o número certo.
+function numeroCanonicoBR(raw) {
+  let digits = (raw || "").replace(/\D/g, "");
+  if (digits.startsWith("55")) digits = digits.slice(2); // remove código do país
+  if (digits.length === 11) digits = digits.slice(0, 2) + digits.slice(3); // remove o 9º dígito (DDD + 9 + 8) → DDD + 8
+  return digits; // DDD (2) + número (8) = 10 dígitos
+}
+
+function numerosBrasileirosEquivalentes(numeroA, numeroB) {
+  const a = numeroCanonicoBR(numeroA);
+  const b = numeroCanonicoBR(numeroB);
+  return Boolean(a) && a === b;
+}
+
 const CATEGORIAS_FINANCEIRO = [
   "Combustível",
   "Manutenção de veículo",
@@ -2485,9 +2504,8 @@ export default async function handler(req, res) {
       // nunca entram no menu de atendimento ao cliente — são tratadas à
       // parte e o webhook retorna aqui mesmo.
       // ------------------------------------------------------------------
-      const phoneDigits = phone.replace(/\D/g, "");
-      const adminDigits = ADMIN_FINANCEIRO_WHATSAPP.replace(/\D/g, "");
-      if (adminDigits && phoneDigits === adminDigits && messageDoc.type === "text") {
+      const ehNumeroFinanceiro = numerosBrasileirosEquivalentes(phone, ADMIN_FINANCEIRO_WHATSAPP);
+      if (ADMIN_FINANCEIRO_WHATSAPP && ehNumeroFinanceiro && messageDoc.type === "text") {
         try {
           await handleFinanceiroMessage({ db, phone, pushName, text: messageDoc.text });
         } catch (finErr) {
