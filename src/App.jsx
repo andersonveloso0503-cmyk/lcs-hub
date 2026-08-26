@@ -10,6 +10,7 @@ import GoogleAdsModule from "./pages/GoogleAdsModule";
 import GoogleAdsOptimizations from "./pages/GoogleAdsOptimizations";
 import BlogGeneratorModule from "./pages/BlogGeneratorModule";
 import ProspeccaoModule from "./pages/ProspeccaoModule";
+import FinanceiroModule from "./pages/FinanceiroModule";
 import "./App.css";
 
 function Gate() {
@@ -28,6 +29,7 @@ function Gate() {
         <Route path="google-ads/optimizations" element={<GoogleAdsOptimizations />} />
         <Route path="blog" element={<BlogGeneratorModule />} />
         <Route path="prospeccao" element={<ProspeccaoModule />} />
+        <Route path="financeiro" element={<FinanceiroModule />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
