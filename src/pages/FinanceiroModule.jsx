@@ -1,14 +1,16 @@
 import React, { useMemo, useState } from "react";
-import { useFinanceiro } from "../financeiro/useFinanceiro";
+import { Pencil, Trash2, Check, X } from "lucide-react";
+import { useFinanceiro, editarLancamento, excluirLancamento } from "../financeiro/useFinanceiro";
 
 // ============================================================================
 // FinanceiroModule — LCS Hub
 // ============================================================================
-// Painel de leitura dos gastos registrados pelo agente financeiro do
-// WhatsApp (api/whatsapp-webhook.js → handleFinanceiroMessage). O registro
-// em si acontece só pelo WhatsApp, mandando mensagem tipo "gastei 50 no
-// mercado" pro número do bot a partir do número pessoal cadastrado em
-// ADMIN_FINANCEIRO_WHATSAPP — aqui é só visualização em tempo real.
+// Painel de leitura (e agora edição/exclusão) dos gastos registrados pelo
+// agente financeiro do WhatsApp (api/whatsapp-webhook.js →
+// handleFinanceiroMessage). O REGISTRO em si acontece só pelo WhatsApp,
+// mandando mensagem tipo "gastei 50 no mercado" pro número do bot a partir
+// do número pessoal cadastrado em ADMIN_FINANCEIRO_WHATSAPP. Aqui dá pra
+// corrigir descrição/valor de um lançamento errado, ou excluir ele.
 //
 // Os valores da LCS ficam bloqueados atrás de uma senha simples (o total e a
 // tabela aparecem mascarados até destravar). É uma trava de tela, não
@@ -116,12 +118,116 @@ function CadeadoLCS({ senha, setSenha, erro, onDesbloquear }) {
   );
 }
 
+function LinhaLancamento({ lancamento, editando, onIniciarEdicao, onCancelarEdicao, onSalvar, onExcluir }) {
+  const [descricaoEdit, setDescricaoEdit] = useState(lancamento.descricao || "");
+  const [valorEdit, setValorEdit] = useState(String(lancamento.valor ?? ""));
+  const [salvando, setSalvando] = useState(false);
+  const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
+
+  if (editando) {
+    return (
+      <tr>
+        <td style={styles.td}>{formatarData(lancamento.criadoEm)}</td>
+        <td style={styles.td}>
+          <EmpresaBadge empresa={lancamento.empresa} />
+        </td>
+        <td style={styles.td}>{lancamento.categoria || "—"}</td>
+        <td style={styles.td}>
+          <input
+            type="text"
+            value={descricaoEdit}
+            onChange={(e) => setDescricaoEdit(e.target.value)}
+            style={styles.editInput}
+            autoFocus
+          />
+        </td>
+        <td style={{ ...styles.td, textAlign: "right" }}>
+          <input
+            type="number"
+            step="0.01"
+            value={valorEdit}
+            onChange={(e) => setValorEdit(e.target.value)}
+            style={{ ...styles.editInput, ...styles.editInputValor }}
+          />
+        </td>
+        <td style={{ ...styles.td, textAlign: "right", whiteSpace: "nowrap" }}>
+          <button
+            title="Salvar"
+            disabled={salvando}
+            onClick={async () => {
+              setSalvando(true);
+              await onSalvar(lancamento.id, {
+                descricao: descricaoEdit.trim(),
+                valor: Number(valorEdit) || 0,
+              });
+              setSalvando(false);
+            }}
+            style={{ ...styles.iconBtn, color: "#1A7A3E" }}
+          >
+            <Check size={16} />
+          </button>
+          <button title="Cancelar" onClick={onCancelarEdicao} style={{ ...styles.iconBtn, color: "#5A6B7A" }}>
+            <X size={16} />
+          </button>
+        </td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr>
+      <td style={styles.td}>{formatarData(lancamento.criadoEm)}</td>
+      <td style={styles.td}>
+        <EmpresaBadge empresa={lancamento.empresa} />
+      </td>
+      <td style={styles.td}>{lancamento.categoria || "—"}</td>
+      <td style={styles.td}>{lancamento.descricao || "—"}</td>
+      <td style={{ ...styles.td, textAlign: "right", fontWeight: 700 }}>{formatarMoeda(lancamento.valor)}</td>
+      <td style={{ ...styles.td, textAlign: "right", whiteSpace: "nowrap" }}>
+        {confirmandoExclusao ? (
+          <>
+            <span style={styles.confirmaTexto}>Excluir?</span>
+            <button
+              title="Confirmar exclusão"
+              onClick={() => onExcluir(lancamento.id)}
+              style={{ ...styles.iconBtn, color: "#B3261E" }}
+            >
+              <Check size={16} />
+            </button>
+            <button
+              title="Cancelar"
+              onClick={() => setConfirmandoExclusao(false)}
+              style={{ ...styles.iconBtn, color: "#5A6B7A" }}
+            >
+              <X size={16} />
+            </button>
+          </>
+        ) : (
+          <>
+            <button title="Editar" onClick={() => onIniciarEdicao(lancamento.id)} style={styles.iconBtn}>
+              <Pencil size={15} />
+            </button>
+            <button
+              title="Excluir"
+              onClick={() => setConfirmandoExclusao(true)}
+              style={{ ...styles.iconBtn, color: "#B3261E" }}
+            >
+              <Trash2 size={15} />
+            </button>
+          </>
+        )}
+      </td>
+    </tr>
+  );
+}
+
 export default function FinanceiroModule() {
   const { lancamentos, loading, error } = useFinanceiro();
   const [filtro, setFiltro] = useState("todas");
   const [lcsDesbloqueada, setLcsDesbloqueada] = useState(false);
   const [senhaInput, setSenhaInput] = useState("");
   const [senhaErro, setSenhaErro] = useState(false);
+  const [editandoId, setEditandoId] = useState(null);
 
   const totaisMes = useMemo(() => {
     const totais = { LCS: 0, VAN: 0 };
@@ -149,6 +255,24 @@ export default function FinanceiroModule() {
     }
   }
 
+  async function handleSalvarEdicao(id, campos) {
+    try {
+      await editarLancamento(id, campos);
+    } catch (err) {
+      alert("Erro ao salvar: " + err.message);
+    } finally {
+      setEditandoId(null);
+    }
+  }
+
+  async function handleExcluir(id) {
+    try {
+      await excluirLancamento(id);
+    } catch (err) {
+      alert("Erro ao excluir: " + err.message);
+    }
+  }
+
   const precisaMostrarCadeado = filtro === "LCS" && !lcsDesbloqueada;
 
   return (
@@ -160,7 +284,8 @@ export default function FinanceiroModule() {
           Manda uma mensagem pro WhatsApp do bot a partir do seu número pessoal — algo tipo{" "}
           <strong>"gastei 50 no mercado"</strong> ou <strong>"120 combustível da van"</strong> — e o gasto
           aparece aqui na hora. Manda <strong>"resumo"</strong> a qualquer momento pra receber o total do
-          mês direto no WhatsApp.
+          mês direto no WhatsApp. Errou algo? Usa o lápis pra corrigir ou a lixeira pra excluir, direto na
+          tabela abaixo.
         </p>
       </header>
 
@@ -211,21 +336,20 @@ export default function FinanceiroModule() {
                   <th style={styles.th}>Categoria</th>
                   <th style={styles.th}>Descrição</th>
                   <th style={{ ...styles.th, textAlign: "right" }}>Valor</th>
+                  <th style={{ ...styles.th, textAlign: "right" }}>Ações</th>
                 </tr>
               </thead>
               <tbody>
                 {lancamentosFiltrados.map((l) => (
-                  <tr key={l.id}>
-                    <td style={styles.td}>{formatarData(l.criadoEm)}</td>
-                    <td style={styles.td}>
-                      <EmpresaBadge empresa={l.empresa} />
-                    </td>
-                    <td style={styles.td}>{l.categoria || "—"}</td>
-                    <td style={styles.td}>{l.descricao || "—"}</td>
-                    <td style={{ ...styles.td, textAlign: "right", fontWeight: 700 }}>
-                      {formatarMoeda(l.valor)}
-                    </td>
-                  </tr>
+                  <LinhaLancamento
+                    key={l.id}
+                    lancamento={l}
+                    editando={editandoId === l.id}
+                    onIniciarEdicao={setEditandoId}
+                    onCancelarEdicao={() => setEditandoId(null)}
+                    onSalvar={handleSalvarEdicao}
+                    onExcluir={handleExcluir}
+                  />
                 ))}
               </tbody>
             </table>
@@ -338,6 +462,27 @@ const styles = {
     color: "#33424F",
     whiteSpace: "nowrap",
   },
+  iconBtn: {
+    background: "none",
+    border: "none",
+    cursor: "pointer",
+    padding: 6,
+    borderRadius: 6,
+    color: "#5A6B7A",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  confirmaTexto: { fontSize: 12, color: "#B3261E", marginRight: 4 },
+  editInput: {
+    width: "100%",
+    padding: "6px 8px",
+    borderRadius: 6,
+    border: "1px solid #3B6E91",
+    fontSize: 13,
+    fontFamily: "inherit",
+  },
+  editInputValor: { width: 90, textAlign: "right" },
   cadeadoBox: {
     display: "flex",
     flexDirection: "column",
