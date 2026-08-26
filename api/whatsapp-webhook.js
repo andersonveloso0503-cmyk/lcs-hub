@@ -38,7 +38,7 @@ import {
   increment,
 } from "firebase/firestore";
 import { put } from "@vercel/blob";
-import { detectStatusFromMessage, canAutoReclassify } from "./lib/classifyMessage.js";
+import { detectStatusFromMessage, canAutoReclassify } from "../lib/classifyMessage.js";
 import { GoogleAuth } from "google-auth-library";
 
 const firebaseConfig = {
