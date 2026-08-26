@@ -986,6 +986,22 @@ async function sendText(toPhone, text) {
   }
 }
 
+async function sendTextGrupo(groupJid, text) {
+  try {
+    const res = await fetch(`${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+      body: JSON.stringify({ number: groupJid, text }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { ok: false, error: data?.message || "Erro ao enviar pro grupo" };
+    return { ok: true, data };
+  } catch (err) {
+    console.error("Erro ao enviar texto pro grupo via Evolution API:", err);
+    return { ok: false, error: err.message };
+  }
+}
+
 async function sendTextSequence(toPhone, texts) {
   const results = [];
   for (const text of texts) {
@@ -2497,6 +2513,21 @@ export default async function handler(req, res) {
 
     const db = getDb();
     await addDoc(collection(db, "whatsapp_messages"), messageDoc);
+
+    // Comando temporário: manda "idgrupo" dentro de um grupo do WhatsApp e o
+    // bot responde com o ID dele (formato ...@g.us), usado pra configurar
+    // coisas como o relatório semanal (GRUPO_VAN_WHATSAPP). Pode remover
+    // esse bloco depois de pegar o ID que precisar.
+    if (
+      remoteJid.endsWith("@g.us") &&
+      !fromMe &&
+      messageDoc.type === "text" &&
+      normalize(messageDoc.text).trim() === "idgrupo"
+    ) {
+      const jidCompleto = `${phone}@g.us`;
+      await sendTextGrupo(jidCompleto, `🆔 ID deste grupo:\n${jidCompleto}`);
+      return res.status(200).json({ ok: true, idGrupo: jidCompleto });
+    }
 
     if (!fromMe) {
       // ------------------------------------------------------------------
