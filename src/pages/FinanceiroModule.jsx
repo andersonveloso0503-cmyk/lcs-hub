@@ -9,7 +9,16 @@ import { useFinanceiro } from "../financeiro/useFinanceiro";
 // em si acontece só pelo WhatsApp, mandando mensagem tipo "gastei 50 no
 // mercado" pro número do bot a partir do número pessoal cadastrado em
 // ADMIN_FINANCEIRO_WHATSAPP — aqui é só visualização em tempo real.
+//
+// Os valores da LCS ficam bloqueados atrás de uma senha simples (o total e a
+// tabela aparecem mascarados até destravar). É uma trava de tela, não
+// segurança de verdade — quem souber abrir o código-fonte do site consegue
+// ver a senha, então não guarda nada sensível além do que já está visível
+// pra quem tem acesso ao LCS Hub. O desbloqueio vale só pra aba aberta: ao
+// recarregar a página, tranca de novo.
 // ============================================================================
+
+const SENHA_LCS = "1561";
 
 const EMPRESAS = {
   LCS: { label: "LCS Terceirização", emoji: "🏢", cor: "#1A4763", bg: "#EAF2F7" },
@@ -63,14 +72,46 @@ function EmpresaBadge({ empresa }) {
   );
 }
 
-function CardTotal({ empresaKey, total }) {
+function CardTotal({ empresaKey, total, bloqueado }) {
   const info = EMPRESAS[empresaKey];
   return (
     <div style={{ ...styles.totalCard, borderColor: info.bg }}>
       <span style={styles.totalLabel}>
         {info.emoji} {info.label} · este mês
       </span>
-      <span style={{ ...styles.totalValor, color: info.cor }}>{formatarMoeda(total)}</span>
+      <span style={{ ...styles.totalValor, color: info.cor }}>
+        {bloqueado ? "🔒 ••••••" : formatarMoeda(total)}
+      </span>
+    </div>
+  );
+}
+
+function CadeadoLCS({ senha, setSenha, erro, onDesbloquear }) {
+  return (
+    <div style={styles.cadeadoBox}>
+      <span style={{ fontSize: 24 }}>🔒</span>
+      <p style={styles.cadeadoTexto}>Os valores da LCS estão protegidos. Digite a senha pra ver.</p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          onDesbloquear();
+        }}
+        style={styles.cadeadoForm}
+      >
+        <input
+          type="password"
+          inputMode="numeric"
+          value={senha}
+          onChange={(e) => setSenha(e.target.value)}
+          placeholder="Senha"
+          style={styles.cadeadoInput}
+          autoFocus
+        />
+        <button type="submit" style={styles.cadeadoBtn}>
+          Desbloquear
+        </button>
+      </form>
+      {erro && <p style={styles.cadeadoErro}>Senha incorreta.</p>}
     </div>
   );
 }
@@ -78,6 +119,9 @@ function CardTotal({ empresaKey, total }) {
 export default function FinanceiroModule() {
   const { lancamentos, loading, error } = useFinanceiro();
   const [filtro, setFiltro] = useState("todas");
+  const [lcsDesbloqueada, setLcsDesbloqueada] = useState(false);
+  const [senhaInput, setSenhaInput] = useState("");
+  const [senhaErro, setSenhaErro] = useState(false);
 
   const totaisMes = useMemo(() => {
     const totais = { LCS: 0, VAN: 0 };
@@ -90,9 +134,22 @@ export default function FinanceiroModule() {
   }, [lancamentos]);
 
   const lancamentosFiltrados = useMemo(() => {
-    if (filtro === "todas") return lancamentos;
+    if (filtro === "todas") return lancamentos.filter((l) => l.empresa !== "LCS" || lcsDesbloqueada);
+    if (filtro === "LCS") return lcsDesbloqueada ? lancamentos.filter((l) => l.empresa === "LCS") : [];
     return lancamentos.filter((l) => l.empresa === filtro);
-  }, [lancamentos, filtro]);
+  }, [lancamentos, filtro, lcsDesbloqueada]);
+
+  function tentarDesbloquear() {
+    if (senhaInput === SENHA_LCS) {
+      setLcsDesbloqueada(true);
+      setSenhaErro(false);
+      setSenhaInput("");
+    } else {
+      setSenhaErro(true);
+    }
+  }
+
+  const precisaMostrarCadeado = filtro === "LCS" && !lcsDesbloqueada;
 
   return (
     <div style={styles.page}>
@@ -110,8 +167,8 @@ export default function FinanceiroModule() {
       {error && <p style={styles.errorText}>Erro ao carregar lançamentos: {error}</p>}
 
       <div style={styles.totalsGrid}>
-        <CardTotal empresaKey="LCS" total={totaisMes.LCS} />
-        <CardTotal empresaKey="VAN" total={totaisMes.VAN} />
+        <CardTotal empresaKey="LCS" total={totaisMes.LCS} bloqueado={!lcsDesbloqueada} />
+        <CardTotal empresaKey="VAN" total={totaisMes.VAN} bloqueado={false} />
       </div>
 
       <section style={styles.card}>
@@ -130,7 +187,14 @@ export default function FinanceiroModule() {
           ))}
         </div>
 
-        {loading ? (
+        {precisaMostrarCadeado ? (
+          <CadeadoLCS
+            senha={senhaInput}
+            setSenha={setSenhaInput}
+            erro={senhaErro}
+            onDesbloquear={tentarDesbloquear}
+          />
+        ) : loading ? (
           <p style={styles.helperText}>Carregando lançamentos…</p>
         ) : lancamentosFiltrados.length === 0 ? (
           <p style={styles.helperText}>
@@ -166,6 +230,13 @@ export default function FinanceiroModule() {
               </tbody>
             </table>
           </div>
+        )}
+
+        {!precisaMostrarCadeado && filtro === "todas" && !lcsDesbloqueada && (
+          <p style={styles.avisoOculto}>
+            🔒 Os lançamentos da LCS estão ocultos nesta lista. Clica em "🏢 LCS" e digita a senha pra ver
+            eles.
+          </p>
         )}
       </section>
     </div>
@@ -233,6 +304,14 @@ const styles = {
     fontWeight: 600,
   },
   helperText: { fontSize: 13, color: "#5A6B7A", margin: 0, lineHeight: 1.5 },
+  avisoOculto: {
+    fontSize: 13,
+    color: "#8A5A00",
+    background: "#FFF6E5",
+    padding: "10px 14px",
+    borderRadius: 10,
+    marginTop: 16,
+  },
   errorText: {
     color: "#B3261E",
     fontSize: 13,
@@ -259,4 +338,34 @@ const styles = {
     color: "#33424F",
     whiteSpace: "nowrap",
   },
+  cadeadoBox: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    textAlign: "center",
+    padding: "36px 16px",
+    gap: 10,
+  },
+  cadeadoTexto: { fontSize: 14, color: "#5A6B7A", margin: 0, maxWidth: 320 },
+  cadeadoForm: { display: "flex", gap: 8, marginTop: 6 },
+  cadeadoInput: {
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: "1px solid #DCE3E8",
+    fontSize: 15,
+    width: 140,
+    textAlign: "center",
+    letterSpacing: "0.15em",
+  },
+  cadeadoBtn: {
+    padding: "10px 16px",
+    borderRadius: 10,
+    border: "none",
+    background: "#1A4763",
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  cadeadoErro: { fontSize: 13, color: "#B3261E", margin: 0 },
 };
