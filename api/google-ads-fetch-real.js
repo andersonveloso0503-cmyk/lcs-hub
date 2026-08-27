@@ -17,7 +17,7 @@
 // de curta duração a cada execução — não precisa de login manual depois
 // de configurado.
 
-import { getAdminDb } from "../lib/firebaseAdmin.js";
+import { getAdminDb } from "./firebaseAdmin.js";
 
 const GOOGLE_ADS_API_VERSION = "v24";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -1074,6 +1074,36 @@ async function setGeoBidModifier(accessToken, campaignId, geoTargetConstant, bid
  * primeiro da lista (ordenado por nome) até esta função ganhar uma opção
  * de escolha manual.
  */
+/**
+ * Conta quantos anúncios de um grupo estão PAUSADOS (rascunhos ainda não
+ * revisados pelo usuário). Usado pela criação automática de anúncios pra
+ * não empilhar rascunho novo todo dia sem parar.
+ */
+async function countPausedAdsInGroup(accessToken, adGroupId) {
+  const query = `
+    SELECT ad_group_ad.status
+    FROM ad_group_ad
+    WHERE ad_group.id = ${adGroupId} AND ad_group_ad.status = 'PAUSED'
+  `;
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_CUSTOMER_ID,
+    },
+    body: JSON.stringify({ query }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Erro ao contar anúncios pausados: ${text.slice(0, 300)}`);
+  const batches = JSON.parse(text);
+  let count = 0;
+  for (const b of batches) if (b.results) count += b.results.length;
+  return count;
+}
+
 async function fetchFirstAdGroup(accessToken, campaignId) {
   const query = `
     SELECT ad_group.id, ad_group.name, ad_group.status
@@ -1951,17 +1981,25 @@ async function runAutoOptimizations(accessToken) {
   // ativo — mesma regra de segurança do botão manual (AdCreator.jsx).
   // O usuário precisa revisar visualmente no Google Ads e ativar, mesmo
   // com a automação ligada; o "automático" aqui é só a geração + criação
-  // pausada, não a publicação ao vivo. Limite de 1 anúncio novo por
-  // campanha por execução, para não inflar o ad group rapidamente sem
-  // supervisão.
+  // pausada, não a publicação ao vivo.
+  // IMPORTANTE: só cria um anúncio novo se o grupo tiver MENOS de 3
+  // anúncios pausados esperando revisão. Sem esse limite, a automação
+  // cria 1 rascunho por dia pra sempre, mesmo que ninguém tenha revisado
+  // os anteriores — foi assim que uma campanha acumulou 34 rascunhos
+  // parados enquanto só 1 anúncio ficava realmente ativo.
+  const MAX_PENDING_DRAFTS = 3;
   if (enabled.create_ads) {
     const targetCampaigns = campaigns.filter((c) => c.status === "ENABLED" && inScope(c.campaign_id));
     for (const c of targetCampaigns) {
       try {
+        const adGroup = await fetchFirstAdGroup(accessToken, c.campaign_id);
+        const pendingDrafts = await countPausedAdsInGroup(accessToken, adGroup.id);
+        if (pendingDrafts >= MAX_PENDING_DRAFTS) {
+          continue; // já tem rascunho suficiente esperando revisão, não cria mais
+        }
         // Usa o nome da campanha como descrição do serviço, mesmo padrão
         // já usado em "Adição de Palavras" automática.
         const copy = await generateAdCopy(c.name, "https://www.lcsterceirizacaors.com.br");
-        const adGroup = await fetchFirstAdGroup(accessToken, c.campaign_id);
         await createResponsiveSearchAd(
           accessToken,
           adGroup.id,
