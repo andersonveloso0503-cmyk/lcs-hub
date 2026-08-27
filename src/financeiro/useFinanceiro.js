@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc } from "firebase/firestore";
+import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../firebase/config";
 
 const COLLECTION = "financeiro_lancamentos";
@@ -39,4 +39,19 @@ export async function editarLancamento(id, campos) {
 // registrados errado).
 export async function excluirLancamento(id) {
   await deleteDoc(doc(db, COLLECTION, id));
+}
+
+// Cria um lançamento direto pela tela (botão "+ Novo gasto"), sem passar
+// pelo WhatsApp. Mesmo formato de dado que o agente financeiro salva, só que
+// com origem "site" em vez de um telefone.
+export async function criarLancamento({ empresa, valor, categoria, descricao }) {
+  await addDoc(collection(db, COLLECTION), {
+    empresa,
+    valor: Number(valor),
+    categoria: categoria || "Outros",
+    descricao: descricao || "",
+    textoOriginal: "",
+    telefoneOrigem: "site",
+    criadoEm: serverTimestamp(),
+  });
 }
