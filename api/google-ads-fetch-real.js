@@ -678,6 +678,26 @@ async function updateCampaignBudget(accessToken, budgetResourceName, newAmountRe
 }
 
 /**
+ * Ajusta o lance máximo de CPC (cpc_bid) de um grupo de anúncios. Usado
+ * pra corrigir grupos travados com lance quase zero (ex: R$0,01), que
+ * fazem a imensa maioria das palavras-chave nunca serem exibidas
+ * ("raramente exibido") por perderem toda disputa de leilão.
+ */
+async function updateAdGroupCpcBid(accessToken, adGroupId, newAmountReais) {
+  const amountMicros = Math.round(newAmountReais * 1_000_000);
+  const resourceName = `customers/${CUSTOMER_ID}/adGroups/${adGroupId}`;
+  const body = {
+    operations: [
+      {
+        update: { resourceName, cpcBidMicros: String(amountMicros) },
+        updateMask: "cpc_bid_micros",
+      },
+    ],
+  };
+  return runMutation(accessToken, "adGroups:mutate", body);
+}
+
+/**
  * 4.6 — Sugere a estratégia de lance mais adequada baseada no volume de
  * conversões da campanha no período (regra fixa, combinada com o
  * usuário, não decidida livremente pela IA): poucas conversões (<5) ainda
@@ -2462,6 +2482,8 @@ export default async function handler(req, res) {
     action === "revert_action" ||
     action === "preview_conversion_cleanup" ||
     action === "cleanup_conversion_actions" ||
+    action === "preview_low_bids" ||
+    action === "fix_low_bids" ||
     action === "generate_ad_copy" ||
     action === "create_ad" ||
     action === "suggest_keywords" ||
@@ -2568,6 +2590,67 @@ export default async function handler(req, res) {
         const candidates = stats.filter((c) => c.status === "ENABLED" && c.allConversions === 0);
         const keeping = stats.filter((c) => c.status === "ENABLED" && c.allConversions > 0);
         return res.status(200).json({ ok: true, candidates, keeping, total: stats.length });
+      }
+
+      // Mostra os grupos de anúncios com lance muito baixo (que travam a
+      // exibição das palavras-chave) — nada é alterado ainda.
+      if (action === "preview_low_bids") {
+        const THRESHOLD_REAIS = 0.5; // abaixo disso, consideramos "lance travado"
+        const query = `
+          SELECT
+            ad_group.id,
+            ad_group.name,
+            ad_group.cpc_bid_micros,
+            campaign.id,
+            campaign.name
+          FROM ad_group
+          WHERE ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+        `;
+        const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:searchStream`;
+        const gRes = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+            "developer-token": DEVELOPER_TOKEN,
+            "login-customer-id": MCC_CUSTOMER_ID,
+          },
+          body: JSON.stringify({ query }),
+        });
+        const gText = await gRes.text();
+        if (!gRes.ok) throw new Error(`Erro ao buscar grupos de anúncios: ${gText.slice(0, 300)}`);
+        const batches = JSON.parse(gText);
+        const rows = [];
+        for (const b of batches) if (b.results) rows.push(...b.results);
+        const allGroups = rows.map((r) => ({
+          ad_group_id: r.adGroup.id,
+          ad_group_name: r.adGroup.name,
+          campaign_id: r.campaign.id,
+          campaign_name: r.campaign.name,
+          cpc_bid: r.adGroup.cpcBidMicros ? Number(r.adGroup.cpcBidMicros) / 1_000_000 : null,
+        }));
+        const candidates = allGroups.filter((g) => g.cpc_bid !== null && g.cpc_bid < THRESHOLD_REAIS);
+        return res.status(200).json({ ok: true, candidates, total: allGroups.length });
+      }
+
+      // Aplica o novo lance só nos grupos confirmados pelo usuário na tela.
+      if (action === "fix_low_bids") {
+        const { ad_group_ids, new_bid } = req.body;
+        if (!Array.isArray(ad_group_ids) || ad_group_ids.length === 0) {
+          return res.status(400).json({ error: "ad_group_ids é obrigatório e precisa ser uma lista não vazia." });
+        }
+        const amount = Number(new_bid) || 3.0;
+        const applied = [];
+        const errors = [];
+        for (const id of ad_group_ids) {
+          try {
+            await updateAdGroupCpcBid(accessToken, id, amount);
+            applied.push({ ad_group_id: id, new_bid: amount });
+          } catch (err) {
+            errors.push({ ad_group_id: id, message: err.message });
+          }
+        }
+        return res.status(200).json({ ok: true, updated: applied.length, applied, errors });
       }
 
       // Desativa de fato só as ações de conversão cujos IDs vieram no body
