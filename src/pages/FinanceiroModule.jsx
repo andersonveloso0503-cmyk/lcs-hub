@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
-import { Pencil, Trash2, Check, X } from "lucide-react";
-import { useFinanceiro, editarLancamento, excluirLancamento } from "../financeiro/useFinanceiro";
+import { Pencil, Trash2, Check, X, Plus } from "lucide-react";
+import { useFinanceiro, editarLancamento, excluirLancamento, criarLancamento } from "../financeiro/useFinanceiro";
 
 // ============================================================================
 // FinanceiroModule — LCS Hub
@@ -31,6 +31,24 @@ const FILTROS = [
   { valor: "todas", label: "Todas" },
   { valor: "LCS", label: "🏢 LCS" },
   { valor: "VAN", label: "🚐 Van Service" },
+];
+
+// Mesma lista de categorias usada pela IA no agente financeiro do WhatsApp
+// (api/whatsapp-webhook.js → CATEGORIAS_FINANCEIRO), pra manter consistência
+// entre o que é registrado por lá e o que é registrado direto aqui no site.
+const CATEGORIAS = [
+  "Combustível",
+  "Manutenção de veículo",
+  "Materiais e insumos",
+  "Uniformes e EPI",
+  "Salários e encargos",
+  "Aluguel",
+  "Impostos e taxas",
+  "Marketing e publicidade",
+  "Alimentação",
+  "Telefone e internet",
+  "Serviços terceirizados",
+  "Outros",
 ];
 
 function formatarMoeda(valor) {
@@ -221,6 +239,112 @@ function LinhaLancamento({ lancamento, editando, onIniciarEdicao, onCancelarEdic
   );
 }
 
+function NovoGastoModal({ onFechar, onCriado }) {
+  const [empresa, setEmpresa] = useState("VAN");
+  const [valor, setValor] = useState("");
+  const [categoria, setCategoria] = useState(CATEGORIAS[0]);
+  const [descricao, setDescricao] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  const [erro, setErro] = useState("");
+
+  async function handleSalvar(e) {
+    e.preventDefault();
+    const valorNumero = Number(String(valor).replace(",", "."));
+    if (!valorNumero || valorNumero <= 0) {
+      setErro("Digita um valor válido.");
+      return;
+    }
+    setSalvando(true);
+    setErro("");
+    try {
+      await criarLancamento({ empresa, valor: valorNumero, categoria, descricao: descricao.trim() });
+      onCriado();
+    } catch (err) {
+      setErro("Erro ao salvar: " + err.message);
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <div style={styles.modalOverlay} onClick={onFechar}>
+      <form style={styles.modalBox} onClick={(e) => e.stopPropagation()} onSubmit={handleSalvar}>
+        <div style={styles.modalHeader}>
+          <h2 style={styles.modalTitulo}>Novo gasto</h2>
+          <button type="button" onClick={onFechar} style={styles.iconBtn}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <label style={styles.modalLabel}>
+          Empresa
+          <div style={styles.modalEmpresaRow}>
+            <button
+              type="button"
+              onClick={() => setEmpresa("LCS")}
+              style={{ ...styles.modalEmpresaBtn, ...(empresa === "LCS" ? styles.modalEmpresaBtnAtivo : {}) }}
+            >
+              🏢 LCS
+            </button>
+            <button
+              type="button"
+              onClick={() => setEmpresa("VAN")}
+              style={{ ...styles.modalEmpresaBtn, ...(empresa === "VAN" ? styles.modalEmpresaBtnAtivo : {}) }}
+            >
+              🚐 Van Service
+            </button>
+          </div>
+        </label>
+
+        <label style={styles.modalLabel}>
+          Valor (R$)
+          <input
+            type="text"
+            inputMode="decimal"
+            value={valor}
+            onChange={(e) => setValor(e.target.value)}
+            placeholder="Ex: 350,00"
+            style={styles.modalInput}
+            autoFocus
+          />
+        </label>
+
+        <label style={styles.modalLabel}>
+          Categoria
+          <select value={categoria} onChange={(e) => setCategoria(e.target.value)} style={styles.modalInput}>
+            {CATEGORIAS.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label style={styles.modalLabel}>
+          Descrição (opcional)
+          <input
+            type="text"
+            value={descricao}
+            onChange={(e) => setDescricao(e.target.value)}
+            placeholder="Ex: mercado, combustível..."
+            style={styles.modalInput}
+          />
+        </label>
+
+        {erro && <p style={styles.cadeadoErro}>{erro}</p>}
+
+        <div style={styles.modalAcoes}>
+          <button type="button" onClick={onFechar} style={styles.modalBtnCancelar}>
+            Cancelar
+          </button>
+          <button type="submit" disabled={salvando} style={styles.modalBtnSalvar}>
+            {salvando ? "Salvando…" : "Salvar gasto"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function FinanceiroModule() {
   const { lancamentos, loading, error } = useFinanceiro();
   const [filtro, setFiltro] = useState("todas");
@@ -228,6 +352,7 @@ export default function FinanceiroModule() {
   const [senhaInput, setSenhaInput] = useState("");
   const [senhaErro, setSenhaErro] = useState(false);
   const [editandoId, setEditandoId] = useState(null);
+  const [modalAberto, setModalAberto] = useState(false);
 
   const totaisMes = useMemo(() => {
     const totais = { LCS: 0, VAN: 0 };
@@ -297,19 +422,25 @@ export default function FinanceiroModule() {
       </div>
 
       <section style={styles.card}>
-        <div style={styles.filtroRow}>
-          {FILTROS.map((f) => (
-            <button
-              key={f.valor}
-              onClick={() => setFiltro(f.valor)}
-              style={{
-                ...styles.filtroBtn,
-                ...(filtro === f.valor ? styles.filtroBtnActive : {}),
-              }}
-            >
-              {f.label}
-            </button>
-          ))}
+        <div style={styles.filtroRowComBotao}>
+          <div style={styles.filtroRow}>
+            {FILTROS.map((f) => (
+              <button
+                key={f.valor}
+                onClick={() => setFiltro(f.valor)}
+                style={{
+                  ...styles.filtroBtn,
+                  ...(filtro === f.valor ? styles.filtroBtnActive : {}),
+                }}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => setModalAberto(true)} style={styles.novoGastoBtn}>
+            <Plus size={16} />
+            Novo gasto
+          </button>
         </div>
 
         {precisaMostrarCadeado ? (
@@ -363,6 +494,10 @@ export default function FinanceiroModule() {
           </p>
         )}
       </section>
+
+      {modalAberto && (
+        <NovoGastoModal onFechar={() => setModalAberto(false)} onCriado={() => setModalAberto(false)} />
+      )}
     </div>
   );
 }
@@ -513,4 +648,102 @@ const styles = {
     cursor: "pointer",
   },
   cadeadoErro: { fontSize: 13, color: "#B3261E", margin: 0 },
+  filtroRowComBotao: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    flexWrap: "wrap",
+    gap: 12,
+    marginBottom: 16,
+  },
+  novoGastoBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "10px 16px",
+    borderRadius: 10,
+    border: "none",
+    background: "#1A4763",
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(19, 32, 46, 0.5)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+    zIndex: 1000,
+  },
+  modalBox: {
+    background: "#FFFFFF",
+    borderRadius: 16,
+    padding: 24,
+    width: "100%",
+    maxWidth: 380,
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+    boxShadow: "0 8px 30px rgba(19,32,46,0.25)",
+  },
+  modalHeader: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  modalTitulo: { fontSize: 18, fontWeight: 800, margin: 0, color: "#13202E" },
+  modalLabel: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+    fontSize: 13,
+    fontWeight: 600,
+    color: "#33424F",
+  },
+  modalInput: {
+    padding: "10px 12px",
+    borderRadius: 10,
+    border: "1px solid #DCE3E8",
+    fontSize: 14,
+    fontFamily: "inherit",
+    color: "#1A2433",
+  },
+  modalEmpresaRow: { display: "flex", gap: 8 },
+  modalEmpresaBtn: {
+    flex: 1,
+    padding: "10px 12px",
+    borderRadius: 10,
+    border: "1px solid #DCE3E8",
+    background: "#FAFBFC",
+    color: "#33424F",
+    fontSize: 14,
+    cursor: "pointer",
+  },
+  modalEmpresaBtnAtivo: {
+    border: "1px solid #3B6E91",
+    background: "#EAF2F7",
+    color: "#1A4763",
+    fontWeight: 700,
+  },
+  modalAcoes: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 4 },
+  modalBtnCancelar: {
+    padding: "10px 16px",
+    borderRadius: 10,
+    border: "1px solid #DCE3E8",
+    background: "#FFFFFF",
+    color: "#33424F",
+    fontSize: 14,
+    cursor: "pointer",
+  },
+  modalBtnSalvar: {
+    padding: "10px 16px",
+    borderRadius: 10,
+    border: "none",
+    background: "#1A4763",
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
 };
