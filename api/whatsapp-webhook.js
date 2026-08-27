@@ -1644,8 +1644,15 @@ async function parseGastoComIA(texto) {
             `Mensagem: "${texto}"\n\n` +
             `Empresas possíveis:\n` +
             `- "LCS": empresa de terceirização — limpeza, portaria, zeladoria, condomínios.\n` +
-            `- "VAN": Van Service — transporte, van, motorista, passageiros.\n` +
-            `Só preencha "empresa" com "LCS" ou "VAN" se a mensagem mencionar claramente uma das duas (nome direto, ou palavras fortemente associadas, tipo "combustível da van" → VAN, "material de limpeza" → LCS). Se não der pra saber com segurança, use null.\n\n` +
+            `- "VAN": Van Service — transporte, van, motorista, passageiros.\n\n` +
+            `REGRA CRÍTICA sobre o campo "empresa": você deve ser EXTREMAMENTE conservador. Só preencha "LCS" ou "VAN" quando a mensagem citar EXPLICITAMENTE o nome da empresa (ex: "da lcs", "da van", "van service") ou uma palavra fortissimamente associada só a uma delas (ex: "combustível da van", "material de limpeza pra lcs"). ` +
+            `NUNCA adivinhe pela categoria genérica do gasto, pelo valor, ou por "achismo" — um gasto com mercado, conta, boleto, ferramenta, manutenção genérica, etc, SEM mencionar qual empresa, é sempre "empresa": null, mesmo que pareça mais provável de ser uma ou outra. Na dúvida, é SEMPRE null.\n\n` +
+            `Exemplos:\n` +
+            `"gastei 350 no mercado" → empresa: null (não diz qual empresa)\n` +
+            `"gastei 350" → empresa: null (não diz qual empresa)\n` +
+            `"120 combustível da van" → empresa: "VAN" (menciona "van" explicitamente)\n` +
+            `"comprei material de limpeza, 80 reais" → empresa: "LCS" (limpeza é exclusivo da LCS)\n` +
+            `"paguei 200 de manutenção" → empresa: null (manutenção pode ser de qualquer uma das duas)\n\n` +
             `Categorias possíveis (escolha SEMPRE uma destas, a que melhor encaixa): ${CATEGORIAS_FINANCEIRO.join(", ")}.\n\n` +
             `Responda APENAS com um JSON válido, sem markdown, sem texto antes ou depois, exatamente neste formato:\n` +
             `{"valor": 50.00, "descricao": "mercado", "categoria": "Materiais e insumos", "empresa": null}\n\n` +
