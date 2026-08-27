@@ -21,6 +21,7 @@ import { db } from "../firebase/config";
 import { useGoogleAdsSnapshot } from "../googleads/useGoogleAdsSnapshot";
 import ActionHistoryCard from "../googleads/ActionHistoryCard";
 import ConversionCleanupCard from "../googleads/ConversionCleanupCard";
+import LowBidFixCard from "../googleads/LowBidFixCard";
 
 // Catálogo completo de otimizações no estilo GIO Brain. As 3 marcadas com
 // available: true já têm a mutação real implementada no backend
@@ -268,6 +269,8 @@ export default function GoogleAdsOptimizations() {
       <ActionHistoryCard />
 
       <ConversionCleanupCard />
+
+      <LowBidFixCard />
 
       {runResult && (
         <div
