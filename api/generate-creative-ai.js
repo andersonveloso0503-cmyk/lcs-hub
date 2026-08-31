@@ -1086,3 +1086,15 @@ Clean, professional, corporate aesthetic, high quality photo, suitable for a rea
     return res.status(500).json({ error: err.message });
   }
 }
+
+export {
+  generateReelScript,
+  generateReelSlideImage,
+  buildShotstackTimeline,
+  submitShotstackRender,
+  checkShotstackRenderStatus,
+  copyVideoToBlob,
+  getInstagramAccountId,
+  createReelContainer,
+  checkAndPublishReel,
+};
