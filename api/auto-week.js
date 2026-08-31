@@ -586,9 +586,9 @@ async function generateCreative(service, format, provider) {
 // por cima via SVG + sharp, pra sair 100% legível e sem erro de grafia
 // (IA de imagem erra muito texto pequeno/em lista).
 const FLYER_SERVICES = [
-  { icon: "🧹", text: "Limpeza e Conservação" },
-  { icon: "🛡️", text: "Portaria e Controle de Acesso" },
-  { icon: "🔧", text: "Zeladoria e Manutenção" },
+  { icon: "✓", text: "Limpeza e Conservação" },
+  { icon: "✓", text: "Portaria e Controle de Acesso" },
+  { icon: "✓", text: "Zeladoria e Manutenção" },
 ];
 const FLYER_WHATSAPP_DISPLAY = "(51) 99889-3033";
 
@@ -609,8 +609,9 @@ function buildFlyerSvg(width, height) {
     const y = servicesStartY + i * (rowH + 14);
     return `
       <rect x="${pad}" y="${y}" width="${width - pad * 2}" height="${rowH}" rx="14" fill="rgba(255,255,255,0.94)" />
-      <text x="${pad + 22}" y="${y + rowH * 0.65}" font-size="${Math.round(rowH * 0.55)}" font-family="sans-serif">${s.icon}</text>
-      <text x="${pad + 70}" y="${y + rowH * 0.65}" font-size="${Math.round(rowH * 0.4)}" font-family="sans-serif" font-weight="700" fill="#1A0640">${escapeXml(s.text)}</text>`;
+      <circle cx="${pad + 34}" cy="${y + rowH / 2}" r="${Math.round(rowH * 0.28)}" fill="#2A04A9" />
+      <text x="${pad + 34}" y="${y + rowH * 0.62}" font-size="${Math.round(rowH * 0.4)}" font-family="DejaVu Sans" font-weight="bold" fill="#FFFFFF" text-anchor="middle">${s.icon}</text>
+      <text x="${pad + 70}" y="${y + rowH * 0.65}" font-size="${Math.round(rowH * 0.4)}" font-family="DejaVu Sans" font-weight="bold" fill="#1A0640">${escapeXml(s.text)}</text>`;
   }).join("\n");
 
   const footerY = height - Math.round(height * 0.1);
@@ -628,31 +629,43 @@ function buildFlyerSvg(width, height) {
 
     <!-- Selo LCS -->
     <rect x="${pad}" y="${Math.round(height * 0.05)}" width="${Math.round(width * 0.32)}" height="${Math.round(height * 0.045)}" rx="10" fill="#FAD72D" />
-    <text x="${pad + 16}" y="${Math.round(height * 0.05) + Math.round(height * 0.045 * 0.68)}" font-size="${Math.round(height * 0.028)}" font-family="sans-serif" font-weight="800" fill="#1A0640">LCS TERCEIRIZAÇÃO</text>
+    <text x="${pad + 16}" y="${Math.round(height * 0.05) + Math.round(height * 0.045 * 0.68)}" font-size="${Math.round(height * 0.028)}" font-family="DejaVu Sans" font-weight="800" fill="#1A0640">LCS TERCEIRIZAÇÃO</text>
 
     <!-- Headline -->
-    <text x="${pad}" y="${Math.round(height * 0.15)}" font-size="${Math.round(width * 0.075)}" font-family="sans-serif" font-weight="800" fill="#FFFFFF">Soluções que</text>
-    <text x="${pad}" y="${Math.round(height * 0.15) + Math.round(width * 0.08)}" font-size="${Math.round(width * 0.075)}" font-family="sans-serif" font-weight="800" fill="#FAD72D">transformam</text>
-    <text x="${pad}" y="${Math.round(height * 0.15) + Math.round(width * 0.16)}" font-size="${Math.round(width * 0.075)}" font-family="sans-serif" font-weight="800" fill="#FFFFFF">seu dia a dia</text>
+    <text x="${pad}" y="${Math.round(height * 0.15)}" font-size="${Math.round(width * 0.075)}" font-family="DejaVu Sans" font-weight="800" fill="#FFFFFF">Soluções que</text>
+    <text x="${pad}" y="${Math.round(height * 0.15) + Math.round(width * 0.08)}" font-size="${Math.round(width * 0.075)}" font-family="DejaVu Sans" font-weight="800" fill="#FAD72D">transformam</text>
+    <text x="${pad}" y="${Math.round(height * 0.15) + Math.round(width * 0.16)}" font-size="${Math.round(width * 0.075)}" font-family="DejaVu Sans" font-weight="800" fill="#FFFFFF">seu dia a dia</text>
 
-    <text x="${pad}" y="${Math.round(height * 0.45)}" font-size="${Math.round(width * 0.032)}" font-family="sans-serif" fill="#EDEBF7">Mais de 10 anos cuidando de condomínios e empresas em Porto Alegre</text>
+    <text x="${pad}" y="${Math.round(height * 0.45)}" font-size="${Math.round(width * 0.032)}" font-family="DejaVu Sans" fill="#EDEBF7">Mais de 10 anos cuidando de condomínios e empresas em Porto Alegre</text>
 
     ${serviceRows}
 
     <!-- Rodapé WhatsApp -->
     <rect x="0" y="${footerY}" width="${width}" height="${height - footerY}" fill="#4A0508" />
-    <text x="${pad}" y="${footerY + (height - footerY) * 0.65}" font-size="${Math.round(width * 0.045)}" font-family="sans-serif" font-weight="800" fill="#FAD72D">📲 Fale agora no WhatsApp: ${FLYER_WHATSAPP_DISPLAY}</text>
+    <text x="${pad}" y="${footerY + (height - footerY) * 0.65}" font-size="${Math.round(width * 0.045)}" font-family="DejaVu Sans" font-weight="800" fill="#FAD72D">Fale agora no WhatsApp: ${FLYER_WHATSAPP_DISPLAY}</text>
   </svg>`;
 }
 
 async function generateFlyerCard(format) {
   const sharp = (await import("sharp")).default;
+  const { Resvg } = await import("@resvg/resvg-js");
+  const { readFileSync } = await import("fs");
+  const { fileURLToPath } = await import("url");
+  const path = await import("path");
+
   const width = 1024;
   const height = format === "stories" ? 1536 : 1024;
   const size = format === "stories" ? "1024x1536" : "1024x1024";
 
+  // Fontes embutidas (não dá pra depender de fonte instalada no servidor —
+  // ambientes serverless geralmente não têm nenhuma, e o texto sai como
+  // caixinhas vazias sem isso).
+  const fontsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lib", "fonts");
+  const fontRegular = readFileSync(path.join(fontsDir, "DejaVuSans.ttf"));
+  const fontBold = readFileSync(path.join(fontsDir, "DejaVuSans-Bold.ttf"));
+
   // Foto de fundo SEM texto — só a cena, pra IA não errar nenhuma palavra
-  // (todo o texto vem depois, desenhado via SVG).
+  // (todo o texto vem depois, desenhado via SVG com fonte embutida).
   const bgPrompt = `Photorealistic photo of a small team of Brazilian facilities services professionals (cleaning, security/portaria, and maintenance staff) in matching navy blue uniforms, standing together in front of a modern residential or commercial building in Porto Alegre, Brazil. Natural lighting, candid professional group photo style, like a real company team photo — not a posed stock photo. No text, no logos, no signage in the image.`;
 
   const res = await fetch("https://api.openai.com/v1/images/generations", {
@@ -678,9 +691,25 @@ async function generateFlyerCard(format) {
   const bgBuffer = Buffer.from(b64, "base64");
   const svg = buildFlyerSvg(width, height);
 
+  // Renderiza o SVG (texto real) em PNG transparente, usando a fonte
+  // embutida — não depende de nada instalado no servidor.
+  const resvg = new Resvg(svg, {
+    font: {
+      fontFiles: [
+        path.join(fontsDir, "DejaVuSans.ttf"),
+        path.join(fontsDir, "DejaVuSans-Bold.ttf"),
+      ],
+      loadSystemFonts: false,
+      defaultFontFamily: "DejaVu Sans",
+    },
+    background: "rgba(0,0,0,0)",
+    fitTo: { mode: "width", value: width },
+  });
+  const overlayPng = resvg.render().asPng();
+
   const finalBuffer = await sharp(bgBuffer)
     .resize(width, height, { fit: "cover" })
-    .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+    .composite([{ input: overlayPng, top: 0, left: 0 }])
     .png()
     .toBuffer();
 
