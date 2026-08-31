@@ -1509,18 +1509,6 @@ export default async function handler(req, res) {
 
   const db = getDb();
 
-  // [DIAGNÓSTICO TEMPORÁRIO] Roda o fluxo de reels agora, sem esperar o cron.
-  if (action === "debug-run-reels") {
-    const db = getDb();
-    const deadline = Date.now() + 55000;
-    try {
-      const results = await runReelFlow(db, deadline);
-      return res.status(200).json({ ok: true, results });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  }
-
   // Captação de leads via Google Places (botão no painel).
   if (req.method === "POST" && action === "leads-search") {
     try {
