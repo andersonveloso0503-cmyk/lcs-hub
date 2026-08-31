@@ -1085,6 +1085,29 @@ export default async function handler(req, res) {
 
   const db = getDb();
 
+  // [DIAGNÓSTICO TEMPORÁRIO] Lista os posts mais recentes direto do Firestore,
+  // sem passar pelo frontend — usado pra depurar por que o dashboard não
+  // estava refletindo os posts novos.
+  if (action === "debug-list-posts") {
+    try {
+      const q = query(collection(db, "posts"), orderBy("createdAt", "desc"), limit(10));
+      const snap = await getDocs(q);
+      const items = snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          day: data.day,
+          status: data.status,
+          scheduledAt: data.scheduledAt,
+          createdAt: data.createdAt?.toDate?.()?.toISOString?.() || data.createdAt,
+        };
+      });
+      return res.status(200).json({ ok: true, count: items.length, items });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
   // Captação de leads via Google Places (botão no painel).
   if (req.method === "POST" && action === "leads-search") {
     try {
