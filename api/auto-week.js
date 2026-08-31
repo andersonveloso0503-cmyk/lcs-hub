@@ -1315,12 +1315,14 @@ async function runGoogleAdsSync() {
 const REEL_DAYS = [1, 3, 5]; // 1=Segunda, 3=Quarta, 5=Sexta (0=Domingo)
 
 const REEL_THEMES = [
-  "Bastidores de um dia de trabalho na limpeza profissional",
+  "Antes e depois de uma limpeza pesada em condomínio",
+  "3 sinais de que a portaria do seu condomínio precisa melhorar",
+  "O antes e depois de uma portaria mal cuidada virando profissional",
   "Erros comuns que condomínios cometem na escolha da portaria",
-  "Dicas rápidas de manutenção predial que todo síndico deveria saber",
-  "O que ninguém te conta sobre terceirizar serviços de limpeza",
-  "Como saber se sua empresa de portaria está fazendo um bom trabalho",
-  "Sinais de que sua empresa precisa trocar de prestador de facilities",
+  "Checklist: o que uma boa empresa de limpeza predial garante",
+  "Antes e depois: área comum suja vs. área comum impecável",
+  "3 sinais de que sua empresa de facilities precisa ser trocada",
+  "Bastidores de um dia de trabalho da equipe de limpeza",
 ];
 
 function pickReelTheme() {
