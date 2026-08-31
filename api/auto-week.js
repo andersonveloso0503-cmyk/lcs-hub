@@ -525,7 +525,7 @@ Style: polished, corporate, B2B marketing photo.`;
       n: 1,
       size,
       quality: "medium",
-      output_format: "b64_json",
+      output_format: "png",
     }),
   });
 
