@@ -10,7 +10,8 @@
   ],
   "functions": {
     "api/auto-week.js": {
-      "includeFiles": "lib/fonts/**"
+      "includeFiles": "lib/fonts/**",
+      "maxDuration": 60
     }
   }
 }
