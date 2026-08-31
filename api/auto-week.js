@@ -1198,6 +1198,19 @@ export default async function handler(req, res) {
 
   const db = getDb();
 
+  // [DIAGNÓSTICO TEMPORÁRIO] Gera só o card flyer e sobe pro Blob, pra
+  // conferir visualmente sem precisar rodar a semana inteira.
+  if (action === "debug-flyer") {
+    try {
+      const format = req.query?.format === "stories" ? "stories" : "post";
+      const dataUri = await generateFlyerCard(format);
+      const url = await uploadToBlob(dataUri, `debug-flyer-${Date.now()}.png`);
+      return res.status(200).json({ ok: true, url });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
   // Captação de leads via Google Places (botão no painel).
   if (req.method === "POST" && action === "leads-search") {
     try {
