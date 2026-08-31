@@ -1390,10 +1390,11 @@ async function startNewReel(db, deadline) {
   const slides = script.slides || [];
   if (slides.length === 0) throw new Error("Roteiro do Reel veio sem slides.");
 
-  const slideImageUrls = [];
-  for (const slide of slides) {
-    slideImageUrls.push(await generateReelSlideImage(slide.scene_description));
-  }
+  // Gera as 4 imagens em PARALELO (sequencial estourava o limite de tempo
+  // da function — cada imagem pode levar 15-20s, 4 em série passa de 1min).
+  const slideImageUrls = await Promise.all(
+    slides.map((slide) => generateReelSlideImage(slide.scene_description))
+  );
   const slideTexts = slides.map((s) => s.text);
 
   const timeline = buildShotstackTimeline(slideImageUrls, slideTexts);
