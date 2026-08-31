@@ -570,9 +570,121 @@ Clean, professional, corporate aesthetic, high quality photo, suitable for a rea
 }
 
 async function generateCreative(service, format, provider) {
+  if (service === "Apresentação Geral LCS") {
+    return generateFlyerCard(format);
+  }
   return provider === "gemini"
     ? generateCreativeGemini(service, format)
     : generateCreativeOpenAI(service, format);
+}
+
+// ── Card "flyer" (Apresentação Geral) ───────────────────────────────────────
+// Diferente do card diário (1 foto + 1 selo simples): este é um card com
+// VÁRIAS informações (lista de serviços, contato, selo de confiança) — tipo
+// os panfletos que concorrentes usam pra engajamento/captação de cliente.
+// A IA só gera a FOTO de fundo (sem nenhum texto); todo o texto é desenhado
+// por cima via SVG + sharp, pra sair 100% legível e sem erro de grafia
+// (IA de imagem erra muito texto pequeno/em lista).
+const FLYER_SERVICES = [
+  { icon: "🧹", text: "Limpeza e Conservação" },
+  { icon: "🛡️", text: "Portaria e Controle de Acesso" },
+  { icon: "🔧", text: "Zeladoria e Manutenção" },
+];
+const FLYER_WHATSAPP_DISPLAY = "(51) 99889-3033";
+
+function escapeXml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function buildFlyerSvg(width, height) {
+  const pad = Math.round(width * 0.07);
+  const rowH = Math.round(height * 0.065);
+  const servicesStartY = Math.round(height * 0.52);
+
+  const serviceRows = FLYER_SERVICES.map((s, i) => {
+    const y = servicesStartY + i * (rowH + 14);
+    return `
+      <rect x="${pad}" y="${y}" width="${width - pad * 2}" height="${rowH}" rx="14" fill="rgba(255,255,255,0.94)" />
+      <text x="${pad + 22}" y="${y + rowH * 0.65}" font-size="${Math.round(rowH * 0.55)}" font-family="sans-serif">${s.icon}</text>
+      <text x="${pad + 70}" y="${y + rowH * 0.65}" font-size="${Math.round(rowH * 0.4)}" font-family="sans-serif" font-weight="700" fill="#1A0640">${escapeXml(s.text)}</text>`;
+  }).join("\n");
+
+  const footerY = height - Math.round(height * 0.1);
+
+  return `
+  <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="darken" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="rgba(10,4,30,0.55)" />
+        <stop offset="45%" stop-color="rgba(10,4,30,0.25)" />
+        <stop offset="100%" stop-color="rgba(10,4,30,0.75)" />
+      </linearGradient>
+    </defs>
+    <rect x="0" y="0" width="${width}" height="${height}" fill="url(#darken)" />
+
+    <!-- Selo LCS -->
+    <rect x="${pad}" y="${Math.round(height * 0.05)}" width="${Math.round(width * 0.32)}" height="${Math.round(height * 0.045)}" rx="10" fill="#FAD72D" />
+    <text x="${pad + 16}" y="${Math.round(height * 0.05) + Math.round(height * 0.045 * 0.68)}" font-size="${Math.round(height * 0.028)}" font-family="sans-serif" font-weight="800" fill="#1A0640">LCS TERCEIRIZAÇÃO</text>
+
+    <!-- Headline -->
+    <text x="${pad}" y="${Math.round(height * 0.15)}" font-size="${Math.round(width * 0.075)}" font-family="sans-serif" font-weight="800" fill="#FFFFFF">Soluções que</text>
+    <text x="${pad}" y="${Math.round(height * 0.15) + Math.round(width * 0.08)}" font-size="${Math.round(width * 0.075)}" font-family="sans-serif" font-weight="800" fill="#FAD72D">transformam</text>
+    <text x="${pad}" y="${Math.round(height * 0.15) + Math.round(width * 0.16)}" font-size="${Math.round(width * 0.075)}" font-family="sans-serif" font-weight="800" fill="#FFFFFF">seu dia a dia</text>
+
+    <text x="${pad}" y="${Math.round(height * 0.45)}" font-size="${Math.round(width * 0.032)}" font-family="sans-serif" fill="#EDEBF7">Mais de 10 anos cuidando de condomínios e empresas em Porto Alegre</text>
+
+    ${serviceRows}
+
+    <!-- Rodapé WhatsApp -->
+    <rect x="0" y="${footerY}" width="${width}" height="${height - footerY}" fill="#4A0508" />
+    <text x="${pad}" y="${footerY + (height - footerY) * 0.65}" font-size="${Math.round(width * 0.045)}" font-family="sans-serif" font-weight="800" fill="#FAD72D">📲 Fale agora no WhatsApp: ${FLYER_WHATSAPP_DISPLAY}</text>
+  </svg>`;
+}
+
+async function generateFlyerCard(format) {
+  const sharp = (await import("sharp")).default;
+  const width = 1024;
+  const height = format === "stories" ? 1536 : 1024;
+  const size = format === "stories" ? "1024x1536" : "1024x1024";
+
+  // Foto de fundo SEM texto — só a cena, pra IA não errar nenhuma palavra
+  // (todo o texto vem depois, desenhado via SVG).
+  const bgPrompt = `Photorealistic photo of a small team of Brazilian facilities services professionals (cleaning, security/portaria, and maintenance staff) in matching navy blue uniforms, standing together in front of a modern residential or commercial building in Porto Alegre, Brazil. Natural lighting, candid professional group photo style, like a real company team photo — not a posed stock photo. No text, no logos, no signage in the image.`;
+
+  const res = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-image-1.5",
+      prompt: bgPrompt,
+      n: 1,
+      size,
+      quality: "medium",
+      output_format: "png",
+    }),
+  });
+
+  const data = await res.json();
+  const b64 = data?.data?.[0]?.b64_json;
+  if (!b64) throw new Error(`OpenAI sem imagem de fundo pro flyer: ${JSON.stringify(data?.error)}`);
+
+  const bgBuffer = Buffer.from(b64, "base64");
+  const svg = buildFlyerSvg(width, height);
+
+  const finalBuffer = await sharp(bgBuffer)
+    .resize(width, height, { fit: "cover" })
+    .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+    .png()
+    .toBuffer();
+
+  return `data:image/png;base64,${finalBuffer.toString("base64")}`;
 }
 
 // ── Step 3: Upload pro Vercel Blob ────────────────────────────────────────────
