@@ -359,11 +359,11 @@ const SERVICE_TO_AI_KEY = {
 };
 
 const SCENE_BY_SERVICE = {
-  Limpeza: "a professional cleaner in uniform actively cleaning a modern office or building interior, holding cleaning equipment (mop, cloth, or spray bottle), bright and spotless environment",
-  Portaria: "a professional security/reception guard in uniform at a modern building entrance or reception desk, attentive posture, well-lit lobby with security monitors or a check-in counter visible",
-  Facilities: "a maintenance technician in uniform performing building maintenance work (checking electrical panel, fixing equipment, or inspecting HVAC/plumbing), tool belt or toolbox visible, industrial or technical setting",
-  Condomínios: "an exterior or lobby view of a well-maintained modern residential condominium building, clean facade, manicured entrance, possibly with a doorman or maintenance staff visible",
-  Empresas: "a clean, modern, professional corporate office environment, possibly showing a facilities/cleaning or security professional at work in a business setting, polished and orderly",
+  Limpeza: "a real Brazilian cleaning professional in a navy blue uniform, actively cleaning a modern office or residential building interior in Brazil, holding real cleaning equipment (mop, cloth, or spray bottle), natural lighting, bright and spotless environment, candid documentary photo style — not a posed stock photo",
+  Portaria: "a real Brazilian security/reception guard (porteiro) in uniform at a modern building entrance or reception desk in Brazil, attentive posture, well-lit lobby with security monitors, intercom panel or a check-in counter visible, candid documentary photo style — not a posed stock photo",
+  Facilities: "a real Brazilian maintenance technician (zelador) in work uniform performing building maintenance in Brazil (checking an electrical panel, fixing equipment, or inspecting plumbing/HVAC), tool belt or toolbox visible, candid documentary photo style — not a posed stock photo",
+  Condomínios: "the exterior or lobby entrance of a real well-maintained mid-rise residential condominium building typical of a Brazilian city like Porto Alegre, clean facade, manicured entrance, a doorman or maintenance staff visible, natural daylight",
+  Empresas: "a real modern Brazilian corporate office environment, showing a facilities/cleaning or security professional at work in a business setting, natural lighting, candid documentary photo style — not a posed stock photo",
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -504,14 +504,15 @@ async function generateCreativeOpenAI(service, format) {
   const size = format === "stories" ? "1024x1536" : "1024x1024";
   const scene = SCENE_BY_SERVICE[aiKey] || SCENE_BY_SERVICE.Limpeza;
 
-  const imagePrompt = `Professional, modern Instagram marketing creative for a Brazilian facilities services company called "LCS Terceirização" (cleaning, security/portaria, facilities and maintenance services for condominiums and businesses in Porto Alegre, Brazil).
+  const imagePrompt = `Photorealistic Instagram marketing photo for a real Brazilian facilities services company called "LCS Terceirização" (cleaning, security/portaria, facilities and maintenance services for condominiums and businesses in Porto Alegre, Brazil).
 Service: ${aiKey}.
-Background: ${scene}.
-Design: modern modular cards/badges in royal blue (#2A04A9), dark burgundy (#4A0508), and gold (#FAD72D).
+Scene: ${scene}.
+Photo style: realistic photography, natural lighting, candid on-the-job moment — like a real photo taken by a marketing team visiting an actual job site in Brazil. Avoid illustration, cartoon, 3D render, or overly staged stock-photo look.
+Design overlay: modern modular cards/badges in royal blue (#2A04A9), dark burgundy (#4A0508), and gold (#FAD72D).
 One badge with text: "${aiKey.toUpperCase()}"
 One headline card in bold white: "${aiKey} Profissional"
 Footer strip in dark burgundy: "LCS Terceirização"
-Style: polished, corporate, B2B marketing photo.`;
+Style: polished, corporate, B2B marketing photo, consistent with a real Brazilian services company's own photography.`;
 
   const res = await fetch("https://api.openai.com/v1/images/generations", {
     method: "POST",
