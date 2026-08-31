@@ -5,13 +5,7 @@
   "crons": [
     {
       "path": "/api/auto-week",
-      "schedule": "0 10 * * *"
+      "schedule": "*/15 * * * *"
     }
-  ],
-  "functions": {
-    "api/auto-week.js": {
-      "includeFiles": "lib/fonts/**",
-      "maxDuration": 60
-    }
-  }
+  ]
 }
