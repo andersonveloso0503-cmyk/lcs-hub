@@ -32,6 +32,7 @@ import {
   collection,
   addDoc,
   getDocs,
+  getDoc,
   query,
   where,
   orderBy,
@@ -62,6 +63,25 @@ const PDF_PROPOSTAS = {
 const EVOLUTION_BASE_URL = process.env.EVOLUTION_BASE_URL || "https://evolution-api-production-7c15.up.railway.app";
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "lcs_crm";
 const EVOLUTION_TOKEN    = process.env.EVOLUTION_TOKEN    || "833e1efbd3e377537bf10ce7aa61120401d1e420bea7dbd7698b6ca1904379de";
+
+// ID do grupo do WhatsApp (formato 120363...@g.us) que recebe os relatórios
+// de gastos da Van Service. Diferente de número de pessoa — não passa pela
+// normalização de telefone (normalizePhoneForSend), vai direto.
+const GRUPO_VAN_WHATSAPP = process.env.GRUPO_VAN_WHATSAPP || "";
+
+async function sendTextGrupo(groupId, text) {
+  const jid = groupId.includes("@g.us") ? groupId : `${groupId}@g.us`;
+  const res = await fetch(`${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: EVOLUTION_TOKEN },
+    body: JSON.stringify({ number: jid, text }),
+  });
+  const raw = await res.text();
+  let data;
+  try { data = JSON.parse(raw); } catch { data = null; }
+  if (!res.ok) return { ok: false, error: data?.message || raw || "Erro ao enviar pro grupo" };
+  return { ok: true, data };
+}
 
 function normalizePhoneForSend(raw) {
   if (!raw) return null;
@@ -732,6 +752,100 @@ async function uploadToBlob(base64, filename) {
   return blob.url;
 }
 
+// ── Relatórios de gastos — Van Service ──────────────────────────────────────
+// Rodam dentro do cron diário, mas só ENVIAM de fato quando já se passou o
+// intervalo configurado (7 ou 30 dias) desde o último envio de CADA relatório
+// (controlado por um doc separado por relatório no Firestore — não depende
+// de "hoje é domingo"/"hoje é dia 1", então funciona mesmo se o cron atrasar
+// ou a Vercel pular uma execução).
+
+function formatarMoedaRelatorio(valor) {
+  return (Number(valor) || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
+async function runRelatorioVan(db, { chaveState, dias, titulo, comMediaSemanal }) {
+  if (!GRUPO_VAN_WHATSAPP) {
+    return { skipped: true, reason: "GRUPO_VAN_WHATSAPP não configurado" };
+  }
+
+  const stateRef = doc(db, "relatorio_state", chaveState);
+  const stateSnap = await getDoc(stateRef);
+  const ultimoEnvio = stateSnap.exists() && stateSnap.data().ultimoEnvio?.toDate
+    ? stateSnap.data().ultimoEnvio.toDate()
+    : null;
+
+  const agora = new Date();
+  const intervaloMs = dias * 24 * 60 * 60 * 1000;
+  if (ultimoEnvio && agora - ultimoEnvio < intervaloMs) {
+    const diasRestantes = Math.ceil((intervaloMs - (agora - ultimoEnvio)) / (24 * 60 * 60 * 1000));
+    return { skipped: true, reason: `Próximo envio em ~${diasRestantes} dia(s)` };
+  }
+
+  const inicioPeriodo = ultimoEnvio || new Date(agora.getTime() - intervaloMs);
+
+  const snap = await getDocs(
+    query(collection(db, "financeiro_lancamentos"), where("empresa", "==", "VAN"))
+  );
+
+  const porCategoria = {};
+  let total = 0;
+  let quantidade = 0;
+  snap.forEach((d) => {
+    const registro = d.data();
+    const dataRegistro = registro.criadoEm?.toDate ? registro.criadoEm.toDate() : null;
+    if (dataRegistro && dataRegistro >= inicioPeriodo && dataRegistro <= agora) {
+      const valor = Number(registro.valor) || 0;
+      const categoria = registro.categoria || "Outros";
+      porCategoria[categoria] = (porCategoria[categoria] || 0) + valor;
+      total += valor;
+      quantidade += 1;
+    }
+  });
+
+  const linhasCategoria = Object.entries(porCategoria)
+    .sort((a, b) => b[1] - a[1])
+    .map(([categoria, valor]) => `• ${categoria}: ${formatarMoedaRelatorio(valor)}`)
+    .join("\n");
+
+  const formatarData = (d) => d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+  const diasReais = Math.round((agora - inicioPeriodo) / (24 * 60 * 60 * 1000));
+  const periodo = `${formatarData(inicioPeriodo)} a ${formatarData(agora)} (${diasReais} dias)`;
+
+  const linhaMedia = comMediaSemanal && quantidade > 0
+    ? `\n📊 Média semanal: ${formatarMoedaRelatorio(total / (diasReais / 7))}`
+    : "";
+
+  const mensagem = quantidade === 0
+    ? `🚐 *${titulo}*\n📅 ${periodo}\n\nNenhum gasto registrado nesse período.`
+    : `🚐 *${titulo}*\n📅 ${periodo}\n\n${linhasCategoria}\n\n💰 *Total: ${formatarMoedaRelatorio(total)}* (${quantidade} lançamento${quantidade > 1 ? "s" : ""})${linhaMedia}`;
+
+  const envio = await sendTextGrupo(GRUPO_VAN_WHATSAPP, mensagem);
+
+  if (envio.ok) {
+    await setDoc(stateRef, { ultimoEnvio: serverTimestamp() }, { merge: true });
+  }
+
+  return { skipped: false, enviado: envio.ok, total, quantidade, periodo, error: envio.ok ? undefined : envio.error };
+}
+
+async function runRelatorioSemanalVan(db) {
+  return runRelatorioVan(db, {
+    chaveState: "van_semanal",
+    dias: 7,
+    titulo: "Relatório semanal — Van Service",
+    comMediaSemanal: false,
+  });
+}
+
+async function runRelatorioMensalVan(db) {
+  return runRelatorioVan(db, {
+    chaveState: "van_mensal",
+    dias: 30,
+    titulo: "Relatório mensal — Van Service",
+    comMediaSemanal: true,
+  });
+}
+
 // ── Follow-up automático ──────────────────────────────────────────────────────
 
 // Quantas vezes o cron pode mandar follow-up automático pro mesmo contato
@@ -1295,6 +1409,21 @@ export default async function handler(req, res) {
     } catch (duvidaErr) {
       console.error("[auto-week/duvida] Erro fatal:", duvidaErr);
       response.duvidaCheck = { error: duvidaErr.message };
+    }
+
+    // 2.7) Relatórios de gastos — Van Service (só enviam de fato quando já
+    // passou o intervalo de cada um; nos outros dias essa etapa só confere)
+    try {
+      response.relatorioSemanalVan = await runRelatorioSemanalVan(db);
+    } catch (relatorioErr) {
+      console.error("[auto-week/relatorio-semanal-van] Erro fatal:", relatorioErr);
+      response.relatorioSemanalVan = { error: relatorioErr.message };
+    }
+    try {
+      response.relatorioMensalVan = await runRelatorioMensalVan(db);
+    } catch (relatorioErr) {
+      console.error("[auto-week/relatorio-mensal-van] Erro fatal:", relatorioErr);
+      response.relatorioMensalVan = { error: relatorioErr.message };
     }
 
     // 3) Google Ads — sincroniza campanhas e roda otimizações automáticas
