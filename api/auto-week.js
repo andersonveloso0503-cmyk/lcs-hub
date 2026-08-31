@@ -614,7 +614,7 @@ function buildFlyerSvg(width, height) {
       <text x="${pad + 70}" y="${y + rowH * 0.65}" font-size="${Math.round(rowH * 0.4)}" font-family="DejaVu Sans" font-weight="bold" fill="#1A0640">${escapeXml(s.text)}</text>`;
   }).join("\n");
 
-  const footerY = height - Math.round(height * 0.1);
+  const footerY = height - Math.round(height * 0.14);
 
   return `
   <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
@@ -636,13 +636,15 @@ function buildFlyerSvg(width, height) {
     <text x="${pad}" y="${Math.round(height * 0.15) + Math.round(width * 0.08)}" font-size="${Math.round(width * 0.075)}" font-family="DejaVu Sans" font-weight="800" fill="#FAD72D">transformam</text>
     <text x="${pad}" y="${Math.round(height * 0.15) + Math.round(width * 0.16)}" font-size="${Math.round(width * 0.075)}" font-family="DejaVu Sans" font-weight="800" fill="#FFFFFF">seu dia a dia</text>
 
-    <text x="${pad}" y="${Math.round(height * 0.45)}" font-size="${Math.round(width * 0.032)}" font-family="DejaVu Sans" fill="#EDEBF7">Mais de 10 anos cuidando de condomínios e empresas em Porto Alegre</text>
+    <text x="${pad}" y="${Math.round(height * 0.44)}" font-size="${Math.round(width * 0.027)}" font-family="DejaVu Sans" fill="#EDEBF7">Mais de 10 anos cuidando de condomínios</text>
+    <text x="${pad}" y="${Math.round(height * 0.44) + Math.round(width * 0.035)}" font-size="${Math.round(width * 0.027)}" font-family="DejaVu Sans" fill="#EDEBF7">e empresas em Porto Alegre</text>
 
     ${serviceRows}
 
     <!-- Rodapé WhatsApp -->
     <rect x="0" y="${footerY}" width="${width}" height="${height - footerY}" fill="#4A0508" />
-    <text x="${pad}" y="${footerY + (height - footerY) * 0.65}" font-size="${Math.round(width * 0.045)}" font-family="DejaVu Sans" font-weight="800" fill="#FAD72D">Fale agora no WhatsApp: ${FLYER_WHATSAPP_DISPLAY}</text>
+    <text x="${pad}" y="${footerY + (height - footerY) * 0.42}" font-size="${Math.round(width * 0.032)}" font-family="DejaVu Sans" font-weight="800" fill="#FAD72D">Fale agora no WhatsApp</text>
+    <text x="${pad}" y="${footerY + (height - footerY) * 0.8}" font-size="${Math.round(width * 0.042)}" font-family="DejaVu Sans" font-weight="800" fill="#FFFFFF">${FLYER_WHATSAPP_DISPLAY}</text>
   </svg>`;
 }
 
