@@ -1387,8 +1387,13 @@ async function advancePendingReel(db, reelDoc, deadline) {
 async function startNewReel(db, deadline) {
   const theme = pickReelTheme();
   const script = await generateReelScript(theme);
-  const slides = script.slides || [];
-  if (slides.length === 0) throw new Error("Roteiro do Reel veio sem slides.");
+  const rawSlides = script.slides || [];
+  // A IA às vezes devolve um slide sem "text" ou "scene_description" —
+  // filtra os incompletos em vez de deixar o Shotstack rejeitar tudo.
+  const slides = rawSlides.filter(
+    (s) => typeof s?.text === "string" && s.text.trim() && typeof s?.scene_description === "string" && s.scene_description.trim()
+  );
+  if (slides.length < 2) throw new Error(`Roteiro do Reel veio com slides incompletos (${slides.length}/${rawSlides.length} válidos).`);
 
   // Gera as 4 imagens em PARALELO (sequencial estourava o limite de tempo
   // da function — cada imagem pode levar 15-20s, 4 em série passa de 1min).
