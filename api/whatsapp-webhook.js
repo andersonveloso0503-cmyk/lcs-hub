@@ -1488,8 +1488,12 @@ async function runBotFlow({ db, phone, pushName, messageDoc }) {
 // Quanto tempo (em ms) depois de o bot mandar uma mensagem ainda consideramos
 // que um evento "fromMe" recebido é só o eco da própria mensagem do bot
 // voltando pelo webhook, e não um atendente digitando na mão.
-// Palavras-chave não são mais usadas como gatilho.
-// A sugestão de resposta só é gerada quando o fluxo de orçamento é concluído.
+const BOT_ECHO_WINDOW_MS = 8000; // 8 segundos
+
+// Comando que o atendente pode digitar em qualquer conversa pra pausar o bot
+// imediatamente, antes mesmo de mandar a resposta de verdade.
+const COMANDO_PAUSAR = "#pausar";
+const COMANDO_RETOMAR = "#retomar";
 
 const DONO_WHATSAPP = process.env.DONO_WHATSAPP || "5551998893033";
 
@@ -2723,6 +2727,40 @@ export default async function handler(req, res) {
       // respondendo na mão, pelo WhatsApp Business ou pelo CRM. Se for
       // humano, pausamos o agente nesse contato pra não atropelar o
       // atendimento.
+
+      // Verifica se é um comando manual de pausar/retomar
+      const textoEnviado = (
+        messageContent.conversation ||
+        messageContent.extendedTextMessage?.text || ""
+      ).trim().toLowerCase();
+
+      const stateRefCmd = doc(db, "bot_state", phone);
+
+      if (textoEnviado === COMANDO_PAUSAR) {
+        await setDoc(stateRefCmd, {
+          menu: "main", step: 0, data: {},
+          paused: true,
+          pausedReason: "atendimento_humano",
+          updatedAt: serverTimestamp(),
+        });
+        console.log(`[webhook] Bot pausado manualmente via #pausar para ${phone}`);
+        return res.status(200).json({ ok: true, action: "pausado" });
+      }
+
+      if (textoEnviado === COMANDO_RETOMAR) {
+        const snapCmd = await getDoc(stateRefCmd);
+        if (snapCmd.exists()) {
+          await setDoc(stateRefCmd, {
+            ...snapCmd.data(),
+            paused: false,
+            pausedReason: null,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        console.log(`[webhook] Bot retomado via #retomar para ${phone}`);
+        return res.status(200).json({ ok: true, action: "retomado" });
+      }
+
       try {
         await handlePossibleHumanIntervention({
           db,
