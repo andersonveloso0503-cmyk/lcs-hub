@@ -1675,10 +1675,25 @@ async function parseGastoComIA(texto) {
 // Soma os lançamentos do mês atual (America/Sao_Paulo) de uma empresa.
 async function totalDoMes(db, empresa) {
   const agora = new Date();
-  const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1);
+
+  // Usa a mesma referência de início de ciclo do relatório mensal
+  // (relatorio_state/van_mensal.ultimoEnvio) pra LCS e Van Service, em vez
+  // do dia 1 do mês calendário — assim o total que aparece aqui no WhatsApp
+  // bate com o período do relatório mensal mandado no grupo. Se esse doc
+  // ainda não existir (relatório mensal nunca rodou), cai no comportamento
+  // antigo (dia 1 do mês) como fallback.
+  let inicioPeriodo = new Date(agora.getFullYear(), agora.getMonth(), 1);
+  try {
+    const cicloSnap = await getDoc(doc(db, "relatorio_state", "van_mensal"));
+    if (cicloSnap.exists() && cicloSnap.data().ultimoEnvio?.toDate) {
+      inicioPeriodo = cicloSnap.data().ultimoEnvio.toDate();
+    }
+  } catch (err) {
+    console.error("Erro ao ler referência de ciclo do relatório mensal:", err);
+  }
 
   // Filtra só por "empresa" na query (Firestore não precisa de índice composto
-  // pra isso) e filtra o mês em código — evita depender de criar um índice
+  // pra isso) e filtra o período em código — evita depender de criar um índice
   // composto manualmente no console do Firebase pra empresa+criadoEm.
   const snap = await getDocs(
     query(collection(db, "financeiro_lancamentos"), where("empresa", "==", empresa))
@@ -1688,7 +1703,7 @@ async function totalDoMes(db, empresa) {
   snap.forEach((d) => {
     const registro = d.data();
     const dataRegistro = registro.criadoEm?.toDate ? registro.criadoEm.toDate() : null;
-    if (dataRegistro && dataRegistro >= inicioMes) {
+    if (dataRegistro && dataRegistro >= inicioPeriodo) {
       total += Number(registro.valor) || 0;
     }
   });
