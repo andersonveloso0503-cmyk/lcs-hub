@@ -2734,6 +2734,8 @@ export default async function handler(req, res) {
         messageContent.extendedTextMessage?.text || ""
       ).trim().toLowerCase();
 
+      console.log(`[webhook] fromMe texto recebido: "${textoEnviado}" para ${phone}`);
+
       const stateRefCmd = doc(db, "bot_state", phone);
 
       if (textoEnviado === COMANDO_PAUSAR) {
