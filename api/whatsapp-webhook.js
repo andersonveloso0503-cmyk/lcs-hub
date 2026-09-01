@@ -1847,11 +1847,12 @@ async function handleFinanceiroMessage({ db, phone, pushName, text }) {
  * de uma mensagem que o próprio bot mandou, entendemos que foi um atendente
  * humano respondendo manualmente (pelo app do WhatsApp Business ou pelo
  * CRM) e pausamos o agente nesse contato.
+ const BOT_ECHO_WINDOW_MS = 8000;
+
  */
 async function handlePossibleHumanIntervention({ db, phone, messageId, messageTimestamp }) {
   const stateRef = doc(db, "bot_state", phone);
   const stateSnap = await getDoc(stateRef);
-
   // Se não existe nenhum estado ainda, é porque a LCS está iniciando a
   // conversa com esse número pela primeira vez. Criamos já como pausado —
   // o bot não vai entrar nesse atendimento a não ser que alguém mande "menu".
