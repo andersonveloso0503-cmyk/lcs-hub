@@ -1667,6 +1667,9 @@ async function parseGastoComIA(texto) {
   });
 
   const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`API Anthropic retornou erro: ${data?.error?.message || res.status}`);
+  }
   const textoResposta = data?.content?.find((c) => c.type === "text")?.text;
   if (!textoResposta) throw new Error("IA não retornou resposta.");
   return extrairJsonDaResposta(textoResposta);
