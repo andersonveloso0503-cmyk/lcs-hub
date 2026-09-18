@@ -2604,8 +2604,12 @@ export default async function handler(req, res) {
       }
 
       // Encaminha qualquer PDF recebido pro fiscal operacional, independente
-      // de o candidato ter passado pelo menu ou não.
-      if (messageDoc.type === "document") {
+      // de o candidato ter passado pelo menu ou não. Só considera conversas
+      // individuais (candidato → bot) — mensagens de GRUPO (ex: o grupo da
+      // Van Service, do qual o bot também participa) nunca entram aqui,
+      // senão qualquer documento trocado no grupo vira "novo currículo" pro
+      // Daniel por engano.
+      if (messageDoc.type === "document" && !remoteJid.endsWith("@g.us")) {
         try {
           const FISCAL_WHATSAPP = process.env.FISCAL_OPERACIONAL_WHATSAPP || "5551997711809";
           const nomeCandidato = pushName || phone;
