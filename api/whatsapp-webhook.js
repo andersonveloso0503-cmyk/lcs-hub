@@ -2603,20 +2603,23 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, financeiro: true });
       }
 
-      // Encaminha qualquer PDF recebido pro fiscal operacional, independente
-      // de o candidato ter passado pelo menu ou não. Só considera conversas
-      // individuais (candidato → bot) — mensagens de GRUPO (ex: o grupo da
-      // Van Service, do qual o bot também participa) nunca entram aqui,
-      // senão qualquer documento trocado no grupo vira "novo currículo" pro
-      // Daniel por engano.
-      if (messageDoc.type === "document" && !remoteJid.endsWith("@g.us")) {
+      // Encaminha PDF recebido pro fiscal operacional, mas SÓ quando a
+      // conversa está no fluxo de currículo (menu "curriculo_aguardando",
+      // setado em handleCurriculoAguardando quando a pessoa diz que quer
+      // trabalhar com a gente). Isso evita que qualquer outro documento —
+      // nota fiscal, comprovante, foto de RG pra orçamento, etc. — vindo de
+      // alguém que não é candidato seja mandado pro Daniel como "novo
+      // currículo" por engano. Também só considera conversas individuais
+      // (candidato → bot) — mensagens de GRUPO (ex: o grupo da Van Service,
+      // do qual o bot também participa) nunca entram aqui.
+      const stateSnapFiscal = messageDoc.type === "document" ? await getDoc(doc(db, "bot_state", phone)) : null;
+      const estaNoFluxoCurriculo = stateSnapFiscal?.exists() && stateSnapFiscal.data()?.menu === "curriculo_aguardando";
+
+      if (messageDoc.type === "document" && !remoteJid.endsWith("@g.us") && estaNoFluxoCurriculo) {
         try {
           const FISCAL_WHATSAPP = process.env.FISCAL_OPERACIONAL_WHATSAPP || "5551997711809";
           const nomeCandidato = pushName || phone;
-          const stateSnapFiscal = await getDoc(doc(db, "bot_state", phone));
-          const infoTexto = stateSnapFiscal.exists()
-            ? stateSnapFiscal.data()?.data?.infoTexto || "Não informado"
-            : "Não informado";
+          const infoTexto = stateSnapFiscal.data()?.data?.infoTexto || "Não informado";
 
           await sendText(
             normalizePhoneForSend(FISCAL_WHATSAPP),

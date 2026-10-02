@@ -764,11 +764,12 @@ async function uploadToBlob(base64, filename) {
 }
 
 // ── Relatórios de gastos — Van Service ──────────────────────────────────────
-// Rodam dentro do cron diário, mas só ENVIAM de fato quando já se passou o
-// intervalo configurado (7 ou 30 dias) desde o último envio de CADA relatório
-// (controlado por um doc separado por relatório no Firestore — não depende
-// de "hoje é domingo"/"hoje é dia 1", então funciona mesmo se o cron atrasar
-// ou a Vercel pular uma execução).
+// Antes rodavam sozinhos dentro do cron diário (a cada 7/30 dias). Por
+// pedido do Anderson, pararam de disparar automaticamente pro grupo — agora
+// só enviam quando ele clica no botão "Enviar agora" na tela Financeiro do
+// site, que chama este mesmo endpoint com ?action=relatorio-financeiro-enviar.
+// Cada clique manda o resumo da janela de 7 ou 30 dias contados a partir de
+// AGORA (não espera nenhum intervalo mínimo desde o envio anterior).
 
 function formatarMoedaRelatorio(valor) {
   return (Number(valor) || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -780,19 +781,12 @@ async function runRelatorioVan(db, { chaveState, dias, titulo, comMediaSemanal }
   }
 
   const stateRef = doc(db, "relatorio_state", chaveState);
-  const stateSnap = await getDoc(stateRef);
-  const ultimoEnvio = stateSnap.exists() && stateSnap.data().ultimoEnvio?.toDate
-    ? stateSnap.data().ultimoEnvio.toDate()
-    : null;
-
   const agora = new Date();
   const intervaloMs = dias * 24 * 60 * 60 * 1000;
-  if (ultimoEnvio && agora - ultimoEnvio < intervaloMs) {
-    const diasRestantes = Math.ceil((intervaloMs - (agora - ultimoEnvio)) / (24 * 60 * 60 * 1000));
-    return { skipped: true, reason: `Próximo envio em ~${diasRestantes} dia(s)` };
-  }
 
-  const inicioPeriodo = ultimoEnvio || new Date(agora.getTime() - intervaloMs);
+  // Envio sempre manual agora: a janela é sempre "os últimos N dias a partir
+  // de agora", independente de quando foi o envio anterior.
+  const inicioPeriodo = new Date(agora.getTime() - intervaloMs);
 
   const snap = await getDocs(
     query(collection(db, "financeiro_lancamentos"), where("empresa", "==", "VAN"))
@@ -833,6 +827,10 @@ async function runRelatorioVan(db, { chaveState, dias, titulo, comMediaSemanal }
   const envio = await sendTextGrupo(GRUPO_VAN_WHATSAPP, mensagem);
 
   if (envio.ok) {
+    // Mantém o registro de "último envio" — é o que alimenta o período do
+    // total mostrado no WhatsApp após cada gasto (totalDoMes, no
+    // whatsapp-webhook.js), que usa relatorio_state/van_mensal.ultimoEnvio
+    // como início do ciclo atual.
     await setDoc(stateRef, { ultimoEnvio: serverTimestamp() }, { merge: true });
   }
 
@@ -1493,7 +1491,9 @@ export default async function handler(req, res) {
   const bodySecret = (req.body?.secret || "").toString().trim();
   const headerOk = CRON_SECRET && authHeader === `Bearer ${CRON_SECRET}`;
   const queryOk = CRON_SECRET && querySecret === CRON_SECRET;
-  const isPanelTrigger = req.headers["x-panel-trigger"] === "lcs-hub-leads-panel";
+  const isPanelTrigger =
+    req.headers["x-panel-trigger"] === "lcs-hub-leads-panel" ||
+    req.headers["x-panel-trigger"] === "lcs-hub-financeiro-panel";
   const updateSecretOk =
     process.env.UPDATE_SECRET &&
     (bodySecret === process.env.UPDATE_SECRET || querySecret === process.env.UPDATE_SECRET);
@@ -1527,6 +1527,21 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, ...result });
     } catch (err) {
       console.error("[email-send] Erro fatal:", err);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
+  // Envio manual do relatório de gastos da Van Service pro grupo do
+  // WhatsApp (botão "Enviar agora" na tela Financeiro). body.tipo é
+  // "semanal" (últimos 7 dias) ou "mensal" (últimos 30 dias).
+  if (req.method === "POST" && action === "relatorio-financeiro-enviar") {
+    try {
+      const tipo = req.body?.tipo === "mensal" ? "mensal" : "semanal";
+      const resultado =
+        tipo === "mensal" ? await runRelatorioMensalVan(db) : await runRelatorioSemanalVan(db);
+      return res.status(200).json({ ok: true, tipo, ...resultado });
+    } catch (err) {
+      console.error("[relatorio-financeiro-enviar] Erro fatal:", err);
       return res.status(500).json({ ok: false, error: err.message });
     }
   }
@@ -1577,20 +1592,11 @@ export default async function handler(req, res) {
       response.duvidaCheck = { error: duvidaErr.message };
     }
 
-    // 2.7) Relatórios de gastos — Van Service (só enviam de fato quando já
-    // passou o intervalo de cada um; nos outros dias essa etapa só confere)
-    try {
-      response.relatorioSemanalVan = await runRelatorioSemanalVan(db);
-    } catch (relatorioErr) {
-      console.error("[auto-week/relatorio-semanal-van] Erro fatal:", relatorioErr);
-      response.relatorioSemanalVan = { error: relatorioErr.message };
-    }
-    try {
-      response.relatorioMensalVan = await runRelatorioMensalVan(db);
-    } catch (relatorioErr) {
-      console.error("[auto-week/relatorio-mensal-van] Erro fatal:", relatorioErr);
-      response.relatorioMensalVan = { error: relatorioErr.message };
-    }
+    // 2.7) Relatórios de gastos — Van Service: DESATIVADO por pedido do
+    // Anderson. O cron diário não manda mais isso sozinho pro grupo — o
+    // envio agora só acontece quando ele clica em "Enviar agora" na tela
+    // Financeiro (botão → action=relatorio-financeiro-enviar, mais abaixo
+    // neste arquivo).
 
     // 3) Google Ads — sincroniza campanhas e roda otimizações automáticas
     // (pausar campanha ruim, aplicar negativa, reduzir orçamento etc.)
