@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Pencil, Trash2, Check, X, Plus } from "lucide-react";
+import { Pencil, Trash2, Check, X, Plus, Send } from "lucide-react";
 import { useFinanceiro, editarLancamento, excluirLancamento, criarLancamento } from "../financeiro/useFinanceiro";
 
 // ============================================================================
@@ -103,6 +103,83 @@ function CardTotal({ empresaKey, total, bloqueado }) {
         {bloqueado ? "🔒 ••••••" : formatarMoeda(total)}
       </span>
     </div>
+  );
+}
+
+function EnviarRelatorioVan() {
+  // Envio manual do relatório de gastos da Van Service pro grupo do
+  // WhatsApp. Antes isso rodava sozinho todo dia dentro do cron
+  // (api/auto-week.js), mas o Anderson pediu pra desativar o envio
+  // automático e deixar só esse botão aqui, pra ele mandar quando quiser.
+  const [enviandoTipo, setEnviandoTipo] = useState(null); // "semanal" | "mensal" | null
+  const [resultado, setResultado] = useState(null); // { tipo, ok, mensagem }
+
+  async function enviar(tipo) {
+    setEnviandoTipo(tipo);
+    setResultado(null);
+    try {
+      const resp = await fetch("/api/auto-week", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-panel-trigger": "lcs-hub-financeiro-panel",
+        },
+        body: JSON.stringify({ action: "relatorio-financeiro-enviar", tipo }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        throw new Error(data?.error || `Erro ao enviar (status ${resp.status})`);
+      }
+      if (data.skipped) {
+        setResultado({ tipo, ok: false, mensagem: data.reason || "Envio não configurado." });
+      } else if (!data.enviado) {
+        setResultado({ tipo, ok: false, mensagem: data.error || "Falha ao enviar pro WhatsApp." });
+      } else {
+        setResultado({
+          tipo,
+          ok: true,
+          mensagem: `Enviado! Total: ${formatarMoeda(data.total)} em ${data.quantidade} lançamento(s).`,
+        });
+      }
+    } catch (err) {
+      setResultado({ tipo, ok: false, mensagem: err.message });
+    } finally {
+      setEnviandoTipo(null);
+    }
+  }
+
+  return (
+    <section style={styles.card}>
+      <h2 style={styles.relatorioTitulo}>📤 Relatório da Van Service no grupo</h2>
+      <p style={styles.helperText}>
+        O envio automático pro grupo do WhatsApp está desligado. Use os botões abaixo pra mandar o
+        relatório na hora que quiser.
+      </p>
+      <div style={styles.relatorioBotoes}>
+        <button
+          onClick={() => enviar("semanal")}
+          disabled={enviandoTipo !== null}
+          style={styles.relatorioBtn}
+        >
+          <Send size={15} />
+          {enviandoTipo === "semanal" ? "Enviando…" : "Enviar relatório semanal (7 dias)"}
+        </button>
+        <button
+          onClick={() => enviar("mensal")}
+          disabled={enviandoTipo !== null}
+          style={styles.relatorioBtn}
+        >
+          <Send size={15} />
+          {enviandoTipo === "mensal" ? "Enviando…" : "Enviar relatório mensal (30 dias)"}
+        </button>
+      </div>
+      {resultado && (
+        <p style={resultado.ok ? styles.relatorioSucesso : styles.relatorioErro}>
+          {resultado.ok ? "✅ " : "⚠️ "}
+          {resultado.mensagem}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -420,6 +497,8 @@ export default function FinanceiroModule() {
         <CardTotal empresaKey="LCS" total={totaisMes.LCS} bloqueado={!lcsDesbloqueada} />
         <CardTotal empresaKey="VAN" total={totaisMes.VAN} bloqueado={false} />
       </div>
+
+      <EnviarRelatorioVan />
 
       <section style={styles.card}>
         <div style={styles.filtroRowComBotao}>
@@ -745,5 +824,36 @@ const styles = {
     fontSize: 14,
     fontWeight: 600,
     cursor: "pointer",
+  },
+  relatorioTitulo: { fontSize: 16, fontWeight: 800, margin: "0 0 6px", color: "#13202E" },
+  relatorioBotoes: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 },
+  relatorioBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "10px 16px",
+    borderRadius: 10,
+    border: "1px solid #3B6E91",
+    background: "#EAF2F7",
+    color: "#1A4763",
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  relatorioSucesso: {
+    fontSize: 13,
+    color: "#1A7A3E",
+    background: "#E9F7EF",
+    padding: "10px 14px",
+    borderRadius: 10,
+    marginTop: 12,
+  },
+  relatorioErro: {
+    fontSize: 13,
+    color: "#B3261E",
+    background: "#FCEBEB",
+    padding: "10px 14px",
+    borderRadius: 10,
+    marginTop: 12,
   },
 };
