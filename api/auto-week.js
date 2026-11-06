@@ -192,7 +192,7 @@ async function claimOrcamento(db, docId, lockField = "propostaLockedAt") {
 }
 
 async function runPropostaCheck(db) {
-  const DELAY_MS = 5 * 60 * 1000; // 5 minutos
+  const DELAY_MS = 10 * 60 * 1000; // 10 minutos (cron a cada 5 min → envio em até ~15 min)
   const agora = Date.now();
   const results = [];
 
