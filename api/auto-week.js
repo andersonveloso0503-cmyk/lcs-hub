@@ -215,6 +215,38 @@ async function runPropostaCheck(db) {
       continue;
     }
 
+    // Se o atendente humano entrou na conversa antes do envio (ou usou
+    // #pausar), NÃO envia a proposta automática: o cliente provavelmente pediu
+    // algo específico. Marca como cancelada para não tentar de novo.
+    try {
+      let ph = String(orc.phone || "").replace(/\D/g, "");
+      if (ph && !ph.startsWith("55")) ph = "55" + ph;
+      const cands = [ph];
+      if (ph.length === 12) cands.push(ph.slice(0, 4) + "9" + ph.slice(4));
+      if (ph.length === 13) cands.push(ph.slice(0, 4) + ph.slice(5));
+      let humano = false;
+      for (const c of cands) {
+        const st = await getDoc(doc(db, "bot_state", c));
+        if (st.exists() && st.data().paused === true && st.data().pausedReason === "atendimento_humano") {
+          humano = true;
+          break;
+        }
+      }
+      if (humano) {
+        await updateDoc(doc(db, "orcamentos", docSnap.id), {
+          propostaEnviada: true,
+          propostaCancelada: true,
+          propostaCanceladaMotivo: "atendimento_humano",
+          propostaCanceladaEm: serverTimestamp(),
+        });
+        results.push({ id: docSnap.id, skipped: true, reason: "Atendimento humano — proposta não enviada" });
+        console.log(`[auto-week/proposta] ⏸️ ${docSnap.id} cancelada: atendimento humano`);
+        continue;
+      }
+    } catch (humanErr) {
+      console.error(`[auto-week/proposta] Erro ao checar atendimento humano ${docSnap.id}:`, humanErr.message);
+    }
+
     const claimed = await claimOrcamento(db, docSnap.id, "propostaLockedAt");
     if (!claimed) {
       results.push({ id: docSnap.id, skipped: true, reason: "Lock ativo" });
